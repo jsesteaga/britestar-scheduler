@@ -75,7 +75,11 @@ export function getWorkers(): Worker[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
-      const stored = JSON.parse(raw) as Worker[];
+      // A manager-only "view name" used to be stored separately; renaming now
+      // changes the real name everyone sees, so fold any old override in.
+      const stored = (JSON.parse(raw) as (Worker & { managerName?: string })[]).map(
+        ({ managerName, ...w }) => (managerName ? { ...w, name: managerName } : w),
+      );
       // Merge in any newly-added default names a returning browser doesn't
       // have yet, without touching existing entries (claimed names, etc.).
       const missing = DEFAULT_WORKERS.filter(
@@ -119,11 +123,6 @@ export function removeWorker(id: string, current: Worker[]): Worker[] {
   const updated = current.filter((w) => w.id !== id);
   saveWorkers(updated);
   return updated;
-}
-
-/** The roster as the manager sees it: each worker's private managerName (if set) replaces their name. */
-export function managerView(workers: Worker[]): Worker[] {
-  return workers.map((w) => (w.managerName ? { ...w, name: w.managerName } : w));
 }
 
 export function claimWorkerName(id: string, name: string, current: Worker[]): Worker[] {

@@ -1,17 +1,19 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import type { Worker } from "../types";
 import { Avatar } from "./ui/Avatar";
 
 type WorkerPickerListProps = {
   workers: Worker[];
   onPick: (workerId: string) => void;
+  // Optional little tag after a name, e.g. "Offered" for volunteers.
+  tagFor?: (worker: Worker) => ReactNode;
 };
 
 // Past this many names, a filter box is quicker than scrolling.
 const SEARCH_THRESHOLD = 6;
 
 /** A dark-themed list of bartenders to pick from — replaces the native <select>, whose option list the browser always drew white. */
-export function WorkerPickerList({ workers, onPick }: WorkerPickerListProps) {
+export function WorkerPickerList({ workers, onPick, tagFor }: WorkerPickerListProps) {
   const [query, setQuery] = useState("");
   const visible = workers.filter((w) => w.name.toLowerCase().includes(query.trim().toLowerCase()));
 
@@ -41,6 +43,7 @@ export function WorkerPickerList({ workers, onPick }: WorkerPickerListProps) {
           >
             <Avatar name={w.name} color={w.avatarColor} imageUrl={w.avatarUrl} size="sm" />
             <span className="truncate">{w.name}</span>
+            {tagFor?.(w)}
           </button>
         ))}
         {visible.length === 0 && (

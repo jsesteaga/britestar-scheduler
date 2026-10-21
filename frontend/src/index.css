@@ -27,26 +27,89 @@
   color-scheme: dark;
 }
 
-/* Background stars (components/StarField.tsx): the whole layer fades in on
-   each week change, and some individual stars slowly pulse. The pulse uses
-   `scale` so it doesn't fight each star's own inline opacity. */
+/* Background stars (components/StarField.tsx).
+   - starfield-drift: each star glides along its own --dx/--dy, fading in at
+     the start and out at the end, so the loop's jump back is invisible.
+   - twinkle / spin use the individual `scale` / `rotate` properties so they
+     stack with the drift's `transform` instead of overwriting it.
+   - shooting stars streak for the first ~6% of a long cycle, then rest. */
 @keyframes starfield-fade {
   from {
     opacity: 0;
   }
 }
+@keyframes starfield-drift {
+  0% {
+    transform: translate3d(0, 0, 0);
+    opacity: 0;
+  }
+  12%,
+  88% {
+    opacity: 1;
+  }
+  100% {
+    transform: translate3d(var(--dx), var(--dy), 0);
+    opacity: 0;
+  }
+}
 @keyframes starfield-twinkle {
   50% {
-    scale: 0.6;
-    filter: brightness(1.6);
+    scale: 0.55;
+    filter: brightness(1.7);
+  }
+}
+@keyframes starfield-spin {
+  to {
+    rotate: 360deg;
+  }
+}
+@keyframes starfield-shooting {
+  0% {
+    transform: rotate(var(--angle)) translateX(0);
+    opacity: 0;
+  }
+  1% {
+    opacity: 1;
+  }
+  6%,
+  100% {
+    transform: rotate(var(--angle)) translateX(var(--len));
+    opacity: 0;
   }
 }
 .starfield-fade {
-  animation: starfield-fade 0.6s ease-out;
+  animation: starfield-fade 0.8s ease-out;
+}
+.starfield-drift {
+  animation-name: starfield-drift;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+  will-change: transform, opacity;
 }
 .starfield-twinkle {
   animation: starfield-twinkle 5s ease-in-out infinite;
 }
+.starfield-spin {
+  animation: starfield-spin 40s linear infinite;
+}
+.starfield-twinkle.starfield-spin {
+  animation:
+    starfield-twinkle 5s ease-in-out infinite,
+    starfield-spin 40s linear infinite;
+}
+.starfield-shooting {
+  width: 120px;
+  height: 2px;
+  border-radius: 9999px;
+  background: linear-gradient(90deg, transparent, rgba(226, 168, 87, 0.15) 30%, rgba(255, 236, 200, 0.85));
+  box-shadow: 0 0 8px 1px rgba(226, 168, 87, 0.35);
+  transform-origin: left center;
+  opacity: 0;
+  animation-name: starfield-shooting;
+  animation-timing-function: ease-out;
+  animation-iteration-count: infinite;
+}
+
 /* Modal (components/ui/Modal.tsx): backdrop fades in, panel pops up. */
 @keyframes modal-fade {
   from {
@@ -68,10 +131,15 @@
 
 @media (prefers-reduced-motion: reduce) {
   .starfield-fade,
+  .starfield-drift,
   .starfield-twinkle,
+  .starfield-spin,
   .modal-backdrop,
   .modal-panel {
     animation: none;
+  }
+  .starfield-shooting {
+    display: none;
   }
 }
 

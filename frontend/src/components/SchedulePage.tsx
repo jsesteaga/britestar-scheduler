@@ -6,37 +6,51 @@ import {
   getAvailability,
   getCoverageRequests,
   getGeneratedWeeks,
+  getNotifications,
+  getPostedWeeks,
   getShifts,
   getSwapRequests,
   getTimeOff,
   saveAvailability,
   saveCoverageRequests,
+  saveNotifications,
+  savePostedWeeks,
   saveShifts,
   saveSwapRequests,
   saveTimeOff,
 } from "../data/scheduleStore";
-import { addWorker, getWorkers, managerView, removeWorker, saveWorkers } from "../data/workers";
+import { addWorker, getWorkers, removeWorker, saveWorkers } from "../data/workers";
+import { describeShift, diffShiftNotifications, type PendingNotification } from "../data/notifications";
 import type {
+  AppNotification,
   Availability,
   CoverageRequest,
   Day,
   DayAvailability,
+  PostedWeek,
   Shift,
   SwapRequest,
   TimeOffRequest,
   Worker,
 } from "../types";
 import { getShiftDrag, isShiftDrag, type DragPayload } from "../utils/dnd";
-import { displayTimeToInputValue, formatCompactTime } from "../utils/time";
 import {
+  displayTimeToInputValue,
+  formatPostedAt,
+  inputValueToDisplayTime,
+} from "../utils/time";
+import {
+  DAY_FULL_NAMES,
   DAYS,
-  formatFriendlyDate,
+  dateToDayName,
   formatMonthTitle,
+  fromISODate,
   formatShortDate,
   formatWeekRange,
   getDatesForWeek,
   getMondayOfWeek,
   getMonthGrid,
+  mondayKeyFor,
   toISODate,
   weekOffsetForDate,
 } from "../utils/week";
@@ -45,17 +59,21 @@ import { BritestarLogo } from "./BritestarLogo";
 import { CoverageRequestForm } from "./CoverageRequestForm";
 import { DayEventNote } from "./DayEventNote";
 import { ManageWorkersPanel } from "./ManageWorkersPanel";
+import { CoverageBoard } from "./CoverageBoard";
+import { ManagerRequests } from "./ManagerRequests";
 import { MonthView } from "./MonthView";
-import type { RequestRow } from "./RequestsPanel";
-import { RequestsPanel } from "./RequestsPanel";
+import { NotificationCenter } from "./NotificationCenter";
+import { ManagerPostBar, ScheduleInTheWorks, type PostState } from "./PostStatus";
 import { SetAvailabilityPanel } from "./SetAvailabilityPanel";
-import { ShiftCard } from "./ShiftCard";
+import { ShiftCard, type BartenderMenu, type CoverageHighlight } from "./ShiftCard";
 import type { ShiftMenuActions } from "./ShiftContextMenu";
 import { StarField } from "./StarField";
 import { SwapRequestForm } from "./SwapRequestForm";
 import { TimeOffCard } from "./TimeOffCard";
 import { Avatar } from "./ui/Avatar";
+import { WorkerPickerList } from "./WorkerPickerList";
 import { Button } from "./ui/Button";
+import { Modal } from "./ui/Modal";
 import { MenuDivider, MenuItem, MenuLabel, Popover } from "./ui/Popover";
 
 type ViewMode = "week" | "month";
@@ -69,7 +87,40 @@ type Snapshot = {
   swapRequests: SwapRequest[];
   availability: Availability[];
   dayEvents: DayEvents;
+  postedWeeks: Record<string, PostedWeek>;
+  notifications: AppNotification[];
 };
+
+// When the bar closes, and the rules for auto-timing a newly added shift
+// (see suggestNextShiftTime).
+const CLOSING_TIME = "2:00 AM";
+const NIGHT_SHIFT_FROM = 19 * 60; // starting 7 PM or later: runs to close
+const MID_SHIFT_END = 21 * 60; // otherwise ends by 9 PM, when the night crew starts…
+const NEW_SHIFT_LENGTH = 4 * 60; // …and is at most 4 hours
+
+/** Minutes since midnight (may exceed 24h for after-midnight times) → "9:00 PM". */
+function minutesToDisplayTime(minutes: number): string {
+  const m = ((minutes % 1440) + 1440) % 1440;
+  const hh = String(Math.floor(m / 60)).padStart(2, "0");
+  const mm = String(m % 60).padStart(2, "0");
+  return inputValueToDisplayTime(`${hh}:${mm}`);
+}
+
+/**
+ * How many shifts differ between the posted snapshot and the live week:
+ * added, removed, or edited (time, bartenders, day, or position).
+ */
+function countShiftChanges(posted: Shift[], live: Shift[]): number {
+  const postedIndex = new Map(posted.map((s, i) => [s.id, { s, i }]));
+  let changes = 0;
+  live.forEach((s, i) => {
+    const before = postedIndex.get(s.id);
+    if (!before) changes++;
+    else if (JSON.stringify(before.s) !== JSON.stringify(s) || before.i !== i) changes++;
+    postedIndex.delete(s.id);
+  });
+  return changes + postedIndex.size;
+}
 
 export function SchedulePage() {
   const [searchParams] = useSearchParams();
@@ -87,7 +138,38 @@ export function SchedulePage() {
   // after, so that seeded value is picked up rather than a stale empty [].
   const [generatedWeeks, setGeneratedWeeks] = useState<string[]>(() => getGeneratedWeeks());
   const [history, setHistory] = useState<Snapshot[]>([]);
+  const [resolveConfirm, setResolveConfirm] = useState<CoverageRequest | null>(null);
+  const [dismissConfirm, setDismissConfirm] = useState<CoverageRequest | null>(null);
   const [dayEvents, setDayEventsRaw] = useState<DayEvents>(() => getDayEvents());
+
+  const [postedWeeks, setPostedWeeksRaw] = useState<Record<string, PostedWeek>>(() => getPostedWeeks());
+  const [notifications, setNotificationsRaw] = useState<AppNotification[]>(() => getNotifications());
+
+  function setNotifications(next: AppNotification[] | ((current: AppNotification[]) => AppNotification[])) {
+    setNotificationsRaw((current) => {
+      const resolved =
+        typeof next === "function" ? (next as (c: AppNotification[]) => AppNotification[])(current) : next;
+      saveNotifications(resolved);
+      return resolved;
+    });
+  }
+
+  function notify(pending: PendingNotification[]) {
+    if (pending.length === 0) return;
+    const createdAt = new Date().toISOString();
+    const fresh = pending.map((p, i) => ({
+      ...p,
+      id: `n${Date.now()}-${i}-${Math.random().toString(36).slice(2, 7)}`,
+      createdAt,
+      read: false,
+    }));
+    setNotifications((current) => [...fresh, ...current].slice(0, 200));
+  }
+
+  function setPostedWeeks(next: Record<string, PostedWeek>) {
+    savePostedWeeks(next);
+    setPostedWeeksRaw(next);
+  }
 
   function setDayEvents(next: DayEvents) {
     saveDayEvents(next);
@@ -104,12 +186,28 @@ export function SchedulePage() {
       return resolved;
     });
   }
+  // Every manager edit to shifts goes through here. Besides saving, it diffs
+  // the old schedule against the new one to notify affected bartenders (on
+  // finalized weeks only) and to close give-away requests that just got
+  // covered. It resolves against this render's `shifts` rather than a state
+  // updater on purpose: React may run updaters twice in dev, which would
+  // send every notification twice.
   function setShifts(next: Shift[] | ((current: Shift[]) => Shift[])) {
-    setShiftsRaw((current) => {
-      const resolved = typeof next === "function" ? (next as (c: Shift[]) => Shift[])(current) : next;
-      saveShifts(resolved);
-      return resolved;
+    const resolved = typeof next === "function" ? (next as (c: Shift[]) => Shift[])(shifts) : next;
+    saveShifts(resolved);
+    setShiftsRaw(resolved);
+
+    const { notifications: pending, resolvedRequestIds } = diffShiftNotifications({
+      before: shifts,
+      after: resolved,
+      isFinalized: (date) => mondayKeyFor(date) in postedWeeks,
+      coverageRequests,
+      nameOf: (id) => workers.find((w) => w.id === id)?.name ?? "someone",
     });
+    notify(pending);
+    if (resolvedRequestIds.length > 0) {
+      setCoverageRequests((current) => current.filter((r) => !resolvedRequestIds.includes(r.id)));
+    }
   }
   function setTimeOff(next: TimeOffRequest[] | ((current: TimeOffRequest[]) => TimeOffRequest[])) {
     setTimeOffRaw((current) => {
@@ -147,10 +245,6 @@ export function SchedulePage() {
       return resolved;
     });
   }
-
-  // What names look like on screen: managers see their private view names
-  // (managerName) in place of real ones; bartenders always see real names.
-  const shownWorkers = isAdmin ? managerView(workers) : workers;
 
   const loggedInUsername = searchParams.get("worker");
   const currentWorker =
@@ -203,7 +297,17 @@ export function SchedulePage() {
   function pushHistory() {
     setHistory((h) => [
       ...h.slice(-19),
-      { shifts, workers, timeOff, coverageRequests, swapRequests, availability, dayEvents },
+      {
+        shifts,
+        workers,
+        timeOff,
+        coverageRequests,
+        swapRequests,
+        availability,
+        dayEvents,
+        postedWeeks,
+        notifications,
+      },
     ]);
   }
 
@@ -211,13 +315,19 @@ export function SchedulePage() {
     setHistory((h) => {
       if (h.length === 0) return h;
       const last = h[h.length - 1];
-      setShifts(last.shifts);
+      // Restored directly (not via setShifts), so undoing doesn't send a
+      // fresh round of notifications — and the ones the undone change sent
+      // are rolled back along with everything else.
+      saveShifts(last.shifts);
+      setShiftsRaw(last.shifts);
+      setNotifications(last.notifications);
       setWorkers(last.workers);
       setTimeOff(last.timeOff);
       setCoverageRequests(last.coverageRequests);
       setSwapRequests(last.swapRequests);
       setAvailability(last.availability);
       setDayEvents(last.dayEvents);
+      setPostedWeeks(last.postedWeeks);
       return h.slice(0, -1);
     });
   }
@@ -227,8 +337,18 @@ export function SchedulePage() {
     setWorkers((current) => addWorker(username, current));
   }
 
+  // Removing someone from the roster ends their account and opens up any
+  // shifts they had from today on. Past shifts are left alone as history.
   function handleRemoveWorker(workerId: string) {
     pushHistory();
+    const today = toISODate(new Date());
+    setShifts((current) =>
+      current.map((s) =>
+        s.date >= today && s.workerIds.includes(workerId)
+          ? { ...s, workerIds: s.workerIds.filter((id) => id !== workerId) }
+          : s,
+      ),
+    );
     setWorkers((current) => removeWorker(workerId, current));
   }
 
@@ -245,12 +365,11 @@ export function SchedulePage() {
     });
   }
 
-  // Empty string clears it, so they show under their own name again.
-  function handleSetManagerName(workerId: string, name: string) {
+  // Renames everywhere — manager view and the bartender's own. Their login
+  // (username) stays the same.
+  function handleRenameWorker(workerId: string, name: string) {
     pushHistory();
-    setWorkers((current) =>
-      current.map((w) => (w.id === workerId ? { ...w, managerName: name || undefined } : w)),
-    );
+    setWorkers((current) => current.map((w) => (w.id === workerId ? { ...w, name, nameClaimed: true } : w)));
   }
 
   function handleAddWorkerToShift(shiftId: string, workerId: string) {
@@ -423,11 +542,30 @@ export function SchedulePage() {
     setShifts((current) => current.filter((shift) => shift.date !== date));
   }
 
+  // A new shift picks up where the day's latest shift ends. From 7 PM on it
+  // runs to close (1–8:30 → 8:30–2); earlier it's a mid shift ending at 9 PM,
+  // at most 4 hours long (1–5 → 5–9, 1–6 → 6–9, 12–3 → 3–7).
+  // If the latest shift already runs to close, the new one copies its times
+  // (an extra closer). An empty day gets the plain default.
+  function suggestNextShiftTime(date: string, current: Shift[]): { start: string; end: string } {
+    const dayShifts = current.filter((s) => s.date === date);
+    if (dayShifts.length === 0) return { start: "12:00 PM", end: "5:00 PM" };
+
+    const latest = dayShifts.reduce((a, b) => (sortMinutes(b.end) > sortMinutes(a.end) ? b : a));
+    const start = sortMinutes(latest.end);
+    const close = sortMinutes(CLOSING_TIME);
+    if (start >= close) return { start: latest.start, end: latest.end };
+
+    const end =
+      start >= NIGHT_SHIFT_FROM ? close : Math.min(start + NEW_SHIFT_LENGTH, MID_SHIFT_END);
+    return { start: latest.end, end: minutesToDisplayTime(end) };
+  }
+
   function handleAddShift(date: string) {
     pushHistory();
     setShifts((current) => [
       ...current,
-      { id: `s${Date.now()}`, date, start: "12:00 PM", end: "5:00 PM", workerIds: [] },
+      { id: `s${Date.now()}`, date, ...suggestNextShiftTime(date, current), workerIds: [] },
     ]);
   }
 
@@ -540,7 +678,186 @@ export function SchedulePage() {
       ...current,
       { id: `c${Date.now()}`, shiftId, requestingWorkerId: currentWorker.id, note: note || undefined },
     ]);
+    // Everyone who could take it hears about it — not the requester, and not
+    // anyone already on that shift.
+    const shift = shifts.find((s) => s.id === shiftId);
+    if (shift) {
+      notify(
+        workers
+          .filter((w) => w.id !== currentWorker.id && !shift.workerIds.includes(w.id))
+          .map((w) => ({
+            workerId: w.id,
+            kind: "needs-coverage" as const,
+            text: `${currentWorker.name} needs coverage: ${describeShift(shift)}. Can you take it?`,
+          })),
+      );
+    }
     setRequestTab(null);
+  }
+
+  // A bartender answers someone's give-away request. null takes back their
+  // answer. Saying "I can cover" lets the requester know right away.
+  function handleRespondCoverage(requestId: string, canCover: boolean | null) {
+    const request = coverageRequests.find((r) => r.id === requestId);
+    if (!request) return;
+    pushHistory();
+    const others = (request.responses ?? []).filter((x) => x.workerId !== currentWorker.id);
+    const responses =
+      canCover === null
+        ? others
+        : [...others, { workerId: currentWorker.id, canCover, at: new Date().toISOString() }];
+    setCoverageRequests((current) => current.map((r) => (r.id === requestId ? { ...r, responses } : r)));
+
+    const shift = shifts.find((s) => s.id === request.shiftId);
+    const requesterName = workers.find((w) => w.id === request.requestingWorkerId)?.name ?? "someone";
+    setNotifications((current) => {
+      const rest = current.filter(
+        (n) => !(n.workerId === currentWorker.id && n.kind === "response" && n.requestId === requestId),
+      );
+      if (canCover === null || !shift) return rest;
+      const mine: AppNotification = {
+        id: `n${Date.now()}-resp`,
+        workerId: currentWorker.id,
+        kind: "response",
+        requestId,
+        read: true,
+        createdAt: new Date().toISOString(),
+        text: canCover
+          ? `You offered to cover ${requesterName}'s shift: ${describeShift(shift)}.`
+          : `You passed on ${requesterName}'s shift: ${describeShift(shift)}.`,
+      };
+      return [mine, ...rest];
+    });
+    if (canCover && shift) {
+      notify([
+        {
+          workerId: request.requestingWorkerId,
+          kind: "offer",
+          text: `${currentWorker.name} offered to cover your shift: ${describeShift(shift)}!`,
+        },
+      ]);
+    }
+  }
+
+  // Who can swap in for a give-away (minus the requester, anyone already on
+  // the shift, and anyone with approved time off that day), each flagged:
+  // offered to cover, said they can't, or usually unavailable that weekday
+  // per their general availability. Ordered best bets first.
+  function exchangeCandidates(request: CoverageRequest): { candidates: Worker[]; flags: Record<string, ExchangeFlag> } {
+    const shift = shifts.find((s) => s.id === request.shiftId);
+    if (!shift) return { candidates: [], flags: {} };
+    const weekday = dateToDayName(fromISODate(shift.date));
+    const off = workersOffOn(shift.date);
+    const flags: Record<string, ExchangeFlag> = {};
+    for (const a of request.responses ?? []) flags[a.workerId] = a.canCover ? "offered" : "cant";
+    for (const a of availability) {
+      if (!flags[a.workerId] && a.days[weekday]?.available === false) flags[a.workerId] = "unavailable";
+    }
+    const rank = (w: Worker) => ({ offered: 0, unavailable: 2, cant: 3 })[flags[w.id] as ExchangeFlag] ?? 1;
+    const candidates = workers
+      .filter((w) => !shift.workerIds.includes(w.id) && !off.includes(w.id))
+      .sort((x, y) => rank(x) - rank(y));
+    return { candidates, flags };
+  }
+
+  // How a shift card looks/acts when someone's giving it away. Managers see
+  // amber + the offer count. Bartenders see amber (green if they offered),
+  // and — for shifts today or later — a right-click / press-and-hold menu
+  // to answer or change their answer.
+  function coverageFor(shift: Shift): { coverage?: CoverageHighlight; bartenderMenu?: BartenderMenu } {
+    const req = coverageRequests.find((r) => r.shiftId === shift.id);
+    if (!req) return {};
+    const answers = req.responses ?? [];
+    if (isAdmin) {
+      const offers = answers.filter((a) => a.canCover).length;
+      return {
+        coverage: {
+          tone: "amber",
+          label: offers ? `Needs coverage · ${offers} offer${offers === 1 ? "" : "s"}` : "Needs coverage",
+        },
+      };
+    }
+
+    const mine = req.requestingWorkerId === currentWorker.id;
+    const answer = answers.find((a) => a.workerId === currentWorker.id);
+    const coverage: CoverageHighlight = mine
+      ? { tone: "amber", label: "Giving away" }
+      : answer?.canCover
+        ? { tone: "green", label: "You offered" }
+        : { tone: "amber", label: answer ? "Needs coverage · passed" : "Needs coverage" };
+
+    if (shift.date < todayISO) return { coverage };
+    if (mine) {
+      return {
+        coverage,
+        bartenderMenu: {
+          title: "Your give-away request",
+          subtitle: describeShift(shift),
+          items: [{ label: "Cancel my request", icon: "✕", danger: true, onClick: () => handleRemoveCoverageRequest(req.id) }],
+        },
+      };
+    }
+    if (shift.workerIds.includes(currentWorker.id)) return { coverage };
+    const requester = workers.find((w) => w.id === req.requestingWorkerId)?.name ?? "Someone";
+    return {
+      coverage,
+      bartenderMenu: {
+        title: `${requester} needs coverage`,
+        subtitle: describeShift(shift),
+        items: [
+          { label: "I can cover", icon: "♥", checked: answer?.canCover === true, onClick: () => handleRespondCoverage(req.id, true) },
+          { label: "Can't cover", icon: "–", checked: answer?.canCover === false, onClick: () => handleRespondCoverage(req.id, false) },
+          ...(answer ? [{ label: "Clear my answer", icon: "↺", onClick: () => handleRespondCoverage(req.id, null) }] : []),
+        ],
+      },
+    };
+  }
+
+  // Manager accepts an offer: the volunteer takes the requester's place in
+  // one step. The shift diff in setShifts then sends "you've been covered" /
+  // "you've been added to cover" and closes the request.
+  function handleAssignCover(request: CoverageRequest, workerId: string) {
+    pushHistory();
+    setShifts((current) =>
+      current.map((s) =>
+        s.id === request.shiftId
+          ? {
+              ...s,
+              workerIds: [
+                ...s.workerIds.filter((id) => id !== request.requestingWorkerId && id !== workerId),
+                workerId,
+              ],
+            }
+          : s,
+      ),
+    );
+  }
+
+  // "Mark resolved" on a give-away request: if the person who asked is still
+  // on that shift, it isn't really covered yet — check with the manager first.
+  function handleResolveCoverage(request: CoverageRequest) {
+    const shift = shifts.find((s) => s.id === request.shiftId);
+    if (shift?.workerIds.includes(request.requestingWorkerId)) setResolveConfirm(request);
+    else handleRemoveCoverageRequest(request.id);
+  }
+
+  // Closing a request while they're still on the shift — let them know
+  // they're still working it.
+  function handleCloseCoverageRequest(request: CoverageRequest, how: "resolved" | "dismissed") {
+    const shift = shifts.find((s) => s.id === request.shiftId);
+    handleRemoveCoverageRequest(request.id);
+    if (shift?.workerIds.includes(request.requestingWorkerId)) {
+      notify([
+        {
+          workerId: request.requestingWorkerId,
+          kind: "request",
+          text:
+            how === "dismissed"
+              ? `Your request to give away ${describeShift(shift)} was dismissed. You're still on it.`
+              : `Your give-away request for ${describeShift(shift)} was closed. You're still on it.`,
+        },
+      ]);
+    }
   }
 
   function handleRemoveCoverageRequest(requestId: string) {
@@ -599,7 +916,66 @@ export function SchedulePage() {
     setViewMode("week");
   }
 
+  // ---- Posting -------------------------------------------------------
+  const weekKey = toISODate(monday);
+  const weekLabel = formatWeekRange(monday);
+  const weekDateSet = new Set(DAYS.map((d) => toISODate(weekDates[d])));
+  const liveWeekShifts = shifts.filter((s) => weekDateSet.has(s.date));
+  const postedWeek: PostedWeek | undefined = postedWeeks[weekKey];
+  const changeCount = postedWeek ? countShiftChanges(postedWeek.shifts, liveWeekShifts) : 0;
+  const postState: PostState = !postedWeek ? "draft" : changeCount === 0 ? "posted" : "changed";
+
+  function handlePostWeek() {
+    pushHistory();
+    // The first time a week is finalized, every bartender hears about it —
+    // with their own shifts listed, or a heads-up that they're not on it.
+    // (A later "Finalize changes" stays quiet: each edit already notified.)
+    if (!postedWeek) {
+      notify(
+        workers.map((w) => {
+          const theirs = liveWeekShifts.filter((s) => s.workerIds.includes(w.id));
+          return {
+            workerId: w.id,
+            kind: "finalized" as const,
+            text:
+              theirs.length > 0
+                ? `The schedule for ${weekLabel} has been finalized. You're on ${theirs.length} shift${
+                    theirs.length === 1 ? "" : "s"
+                  }: ${theirs.map(describeShift).join("; ")}.`
+                : `The schedule for ${weekLabel} has been finalized. You're not on any shifts that week.`,
+          };
+        }),
+      );
+    }
+    setPostedWeeks({
+      ...postedWeeks,
+      [weekKey]: { postedAt: new Date().toISOString(), shifts: liveWeekShifts },
+    });
+  }
+
+  function handleUnpostWeek() {
+    pushHistory();
+    const { [weekKey]: _removed, ...rest } = postedWeeks;
+    setPostedWeeks(rest);
+  }
+
+  // Bartenders see the live schedule too — a week that isn't finalized yet
+  // is just shown blurred, with an "in the works" note over it.
+  const weekInTheWorks = !isAdmin && !postedWeek;
+
   const myShifts = shifts.filter((s) => s.workerIds.includes(currentWorker.id));
+
+  // Only shifts worth giving away: today or later (no past clutter), on a
+  // week the manager has finalized, and not already up for grabs.
+  const todayISO = toISODate(new Date());
+  const alreadyOffered = new Set(
+    coverageRequests.filter((r) => r.requestingWorkerId === currentWorker.id).map((r) => r.shiftId),
+  );
+  const giveAwayShifts = myShifts
+    .filter(
+      (s) => s.date >= todayISO && mondayKeyFor(s.date) in postedWeeks && !alreadyOffered.has(s.id),
+    )
+    .sort((a, b) => a.date.localeCompare(b.date) || sortMinutes(a.start) - sortMinutes(b.start));
 
   const shiftMenuActions: ShiftMenuActions = {
     onAddWorker: handleAddWorkerToShift,
@@ -612,93 +988,6 @@ export function SchedulePage() {
   };
   const dayMenuShifts = dayMenu ? shifts.filter((s) => s.date === dayMenu.date) : [];
 
-  const requestRows: RequestRow[] = [
-    ...timeOff
-      .filter((r) => r.status === "pending")
-      .map((r): RequestRow | null => {
-        const worker = shownWorkers.find((w) => w.id === r.workerId);
-        if (!worker) return null;
-        return {
-          id: `pto-${r.id}`,
-          content: (
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="rounded bg-brite-black/40 px-1.5 py-0.5 text-[10px] font-bold uppercase text-brite-amber">
-                Time off
-              </span>
-              <Avatar name={worker.name} color={worker.avatarColor} size="sm" />
-              <span className="text-sm text-brite-white">
-                {worker.name} —{" "}
-                {r.startDate === r.endDate
-                  ? formatFriendlyDate(r.startDate)
-                  : `${formatFriendlyDate(r.startDate)} – ${formatFriendlyDate(r.endDate)}`}
-              </span>
-              {r.reason && <span className="text-xs text-brite-tan/60">({r.reason})</span>}
-            </div>
-          ),
-          onApprove: () => handleApproveTimeOff(r.id),
-          approveLabel: "Approve",
-          onDeny: () => handleDenyTimeOff(r.id),
-          denyLabel: "Deny",
-        };
-      })
-      .filter((r): r is RequestRow => r !== null),
-    ...coverageRequests
-      .map((r): RequestRow | null => {
-        const worker = shownWorkers.find((w) => w.id === r.requestingWorkerId);
-        const shift = shifts.find((s) => s.id === r.shiftId);
-        if (!worker || !shift) return null;
-        return {
-          id: `cov-${r.id}`,
-          content: (
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="rounded bg-brite-black/40 px-1.5 py-0.5 text-[10px] font-bold uppercase text-brite-amber">
-                Coverage
-              </span>
-              <Avatar name={worker.name} color={worker.avatarColor} size="sm" />
-              <span className="text-sm text-brite-white">
-                {worker.name} needs coverage — {formatFriendlyDate(shift.date)}{" "}
-                {formatCompactTime(shift.start)}–{formatCompactTime(shift.end)}
-              </span>
-              {r.note && <span className="text-xs text-brite-tan/60">({r.note})</span>}
-            </div>
-          ),
-          onApprove: () => handleRemoveCoverageRequest(r.id),
-          approveLabel: "Mark resolved",
-          onDeny: () => handleRemoveCoverageRequest(r.id),
-          denyLabel: "Dismiss",
-        };
-      })
-      .filter((r): r is RequestRow => r !== null),
-    ...swapRequests
-      .map((r): RequestRow | null => {
-        const requester = shownWorkers.find((w) => w.id === r.requestingWorkerId);
-        const target = shownWorkers.find((w) => w.id === r.targetWorkerId);
-        const myShift = shifts.find((s) => s.id === r.requestingShiftId);
-        const targetShift = shifts.find((s) => s.id === r.targetShiftId);
-        if (!requester || !target || !myShift || !targetShift) return null;
-        return {
-          id: `swap-${r.id}`,
-          content: (
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="rounded bg-brite-black/40 px-1.5 py-0.5 text-[10px] font-bold uppercase text-brite-amber">
-                Swap
-              </span>
-              <span className="text-sm text-brite-white">
-                {requester.name} ({formatFriendlyDate(myShift.date)}{" "}
-                {formatCompactTime(myShift.start)}–{formatCompactTime(myShift.end)}) ⇄{" "}
-                {target.name} ({formatFriendlyDate(targetShift.date)}{" "}
-                {formatCompactTime(targetShift.start)}–{formatCompactTime(targetShift.end)})
-              </span>
-            </div>
-          ),
-          onApprove: () => handleApproveSwap(r),
-          approveLabel: "Approve swap",
-          onDeny: () => handleDenySwap(r.id),
-          denyLabel: "Deny",
-        };
-      })
-      .filter((r): r is RequestRow => r !== null),
-  ];
 
   return (
     <div className="min-h-screen bg-brite-black">
@@ -715,6 +1004,42 @@ export function SchedulePage() {
               {isAdmin ? "Full schedule control" : "Bartender"}
             </div>
           </div>
+          {!isAdmin && (
+            <NotificationCenter
+              notifications={notifications.filter((n) => n.workerId === currentWorker.id)}
+              onMarkAllRead={() =>
+                setNotifications((current) =>
+                  current.map((n) => (n.workerId === currentWorker.id ? { ...n, read: true } : n)),
+                )
+              }
+              onClearAll={() =>
+                setNotifications((current) => current.filter((n) => n.workerId !== currentWorker.id))
+              }
+              actionsFor={(n) => {
+                if (n.kind !== "response" || !n.requestId) return null;
+                const req = coverageRequests.find((r) => r.id === n.requestId);
+                const shift = req && shifts.find((s) => s.id === req.shiftId);
+                if (!req || !shift) {
+                  return <span className="text-[11px] italic text-brite-tan/35">This request is closed.</span>;
+                }
+                if (shift.date < todayISO) return null;
+                const offered = (req.responses ?? []).some((a) => a.workerId === currentWorker.id && a.canCover);
+                return (
+                  <button
+                    type="button"
+                    onClick={() => handleRespondCoverage(req.id, !offered)}
+                    className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition-colors ${
+                      offered
+                        ? "border-brite-tan/25 text-brite-tan/70 hover:border-brite-tan/60"
+                        : "border-brite-green/40 text-brite-green hover:bg-brite-green/10"
+                    }`}
+                  >
+                    {offered ? "Can't make it after all" : "Actually, I can cover"}
+                  </button>
+                );
+              }}
+            />
+          )}
           <Avatar
             name={isAdmin ? "Manager" : currentWorker.name}
             color={isAdmin ? "#ab3131" : currentWorker.avatarColor}
@@ -841,6 +1166,16 @@ export function SchedulePage() {
                 {showAvailability ? "Hide availability" : "View availability"}
               </Button>
             )}
+            {isAdmin && viewMode === "week" && (
+              <ManagerPostBar
+                state={postState}
+                postedAt={postedWeek?.postedAt}
+                changeCount={changeCount}
+                weekLabel={weekLabel}
+                onPost={handlePostWeek}
+                onUnpost={handleUnpostWeek}
+              />
+            )}
             {!isAdmin &&
               (
                 [
@@ -863,11 +1198,18 @@ export function SchedulePage() {
           </div>
         </div>
 
-        {viewMode === "week" && weekOffset !== 0 && (
-          <p className="mb-4 text-xs text-brite-tan/40">
-            Note: without a backend yet, every week shows the same template shifts — real
-            per-week history will come once schedules are actually saved.
-          </p>
+        {viewMode === "week" && !isAdmin && (
+          <div className="mb-3">
+            {postedWeek ? (
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-brite-green/30 bg-brite-green/10 px-3 py-1 text-xs font-semibold text-brite-green">
+                ✓ Finalized · {formatPostedAt(postedWeek.postedAt)}
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-brite-amber/30 bg-brite-amber/10 px-3 py-1 text-xs font-semibold text-brite-amber">
+                ● Work in progress
+              </span>
+            )}
+          </div>
         )}
 
         {isAdmin && showManageWorkers && (
@@ -875,13 +1217,16 @@ export function SchedulePage() {
             workers={workers}
             onAdd={handleAddWorker}
             onRemove={handleRemoveWorker}
+            upcomingShiftCount={(id) =>
+              shifts.filter((s) => s.date >= todayISO && s.workerIds.includes(id)).length
+            }
             onReorder={handleReorderWorker}
-            onSetManagerName={handleSetManagerName}
+            onRename={handleRenameWorker}
           />
         )}
 
         {isAdmin && showAvailability && (
-          <AvailabilityPanel availability={availability} workers={shownWorkers} />
+          <AvailabilityPanel availability={availability} workers={workers} />
         )}
 
         {!isAdmin && requestTab === "availability" && (
@@ -896,7 +1241,7 @@ export function SchedulePage() {
         )}
         {!isAdmin && requestTab === "coverage" && (
           <CoverageRequestForm
-            myShifts={myShifts}
+            myShifts={giveAwayShifts}
             onSubmit={handleRequestCoverage}
             onCancel={() => setRequestTab(null)}
           />
@@ -911,18 +1256,51 @@ export function SchedulePage() {
           />
         )}
 
-        {isAdmin && <RequestsPanel rows={requestRows} />}
+        {isAdmin && (
+          <ManagerRequests
+            timeOff={timeOff}
+            coverageRequests={coverageRequests}
+            swapRequests={swapRequests}
+            shifts={shifts}
+            workers={workers}
+            onApproveTimeOff={handleApproveTimeOff}
+            onDenyTimeOff={handleDenyTimeOff}
+            onResolveCoverage={handleResolveCoverage}
+            onDismissCoverage={setDismissConfirm}
+            onAssignCover={handleAssignCover}
+            onApproveSwap={handleApproveSwap}
+            onDenySwap={handleDenySwap}
+          />
+        )}
+        {!isAdmin && (
+          <CoverageBoard
+            requests={coverageRequests}
+            shifts={shifts}
+            workers={workers}
+            me={currentWorker}
+            todayISO={todayISO}
+            onRespond={handleRespondCoverage}
+            onCancelMine={handleRemoveCoverageRequest}
+          />
+        )}
 
         {viewMode === "month" ? (
           <MonthView
             monthOffset={monthOffset}
             shifts={shifts}
-            workers={shownWorkers}
+            workers={workers}
             timeOff={timeOff}
             onSelectDate={handleSelectDateFromMonth}
           />
         ) : (
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-7">
+          <div className="relative">
+          {weekInTheWorks && <ScheduleInTheWorks weekLabel={weekLabel} />}
+          <div
+            aria-hidden={weekInTheWorks || undefined}
+            className={`grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-7 ${
+              weekInTheWorks ? "pointer-events-none select-none opacity-70 blur-[3px]" : ""
+            }`}
+          >
             {DAYS.map((day) => {
               const dayDateStr = toISODate(weekDates[day]);
               const dayShifts = shifts.filter((shift) => shift.date === dayDateStr);
@@ -1010,14 +1388,14 @@ export function SchedulePage() {
                     <TimeOffCard
                       key={request.id}
                       request={request}
-                      worker={shownWorkers.find((w) => w.id === request.workerId) ?? null}
+                      worker={workers.find((w) => w.id === request.workerId) ?? null}
                     />
                   ))}
                   {dayShifts.map((shift) => {
                     const assignedWorkers = shift.workerIds
-                      .map((id) => shownWorkers.find((w) => w.id === id))
+                      .map((id) => workers.find((w) => w.id === id))
                       .filter((w): w is Worker => Boolean(w));
-                    const addableWorkers = shownWorkers.filter(
+                    const addableWorkers = workers.filter(
                       (w) =>
                         !shift.workerIds.includes(w.id) &&
                         !unavailableWorkerIds.includes(w.id),
@@ -1039,6 +1417,7 @@ export function SchedulePage() {
                         onDropOnShift={handleDropOnShift}
                         onDropOnWorker={handleDropOnWorker}
                         onMoveShift={handleMoveShiftNextTo}
+                        {...coverageFor(shift)}
                       />
                     );
                   })}
@@ -1055,6 +1434,30 @@ export function SchedulePage() {
               );
             })}
           </div>
+          </div>
+        )}
+
+        {resolveConfirm && (
+          <ResolveCoverageDialog
+            shift={shifts.find((s) => s.id === resolveConfirm.shiftId)}
+            name={workers.find((w) => w.id === resolveConfirm.requestingWorkerId)?.name ?? "This person"}
+            {...exchangeCandidates(resolveConfirm)}
+            onTakeOff={(shiftId) =>
+              handleRemoveWorkerFromShift(shiftId, resolveConfirm.requestingWorkerId)
+            }
+            onExchange={(workerId) => handleAssignCover(resolveConfirm, workerId)}
+            onClose={() => setResolveConfirm(null)}
+          />
+        )}
+
+        {dismissConfirm && (
+          <DismissCoverageDialog
+            shift={shifts.find((s) => s.id === dismissConfirm.shiftId)}
+            worker={workers.find((w) => w.id === dismissConfirm.requestingWorkerId)}
+            note={dismissConfirm.note}
+            onDismiss={() => handleCloseCoverageRequest(dismissConfirm, "dismissed")}
+            onClose={() => setDismissConfirm(null)}
+          />
         )}
 
         {dayMenu && (
@@ -1103,5 +1506,231 @@ export function SchedulePage() {
         )}
       </main>
     </div>
+  );
+}
+
+type ExchangeFlag = "offered" | "cant" | "unavailable";
+
+const FLAG_TAG: Record<ExchangeFlag, { label: string; className: string }> = {
+  offered: { label: "Offered", className: "bg-brite-green/15 text-brite-green" },
+  cant: { label: "Can't", className: "bg-brite-red/20 text-brite-red-bright" },
+  unavailable: { label: "Unavailable", className: "bg-brite-amber/15 text-brite-amber" },
+};
+
+type ResolveCoverageDialogProps = {
+  shift: Shift | undefined;
+  name: string;
+  candidates: Worker[];
+  flags: Record<string, ExchangeFlag>;
+  onTakeOff: (shiftId: string) => void;
+  onExchange: (workerId: string) => void;
+  onClose: () => void;
+};
+
+/**
+ * Asked before resolving a give-away whose requester is still on the shift:
+ * remove them, exchange them for someone else, or wait.
+ */
+function ResolveCoverageDialog({
+  shift,
+  name,
+  candidates,
+  flags,
+  onTakeOff,
+  onExchange,
+  onClose,
+}: ResolveCoverageDialogProps) {
+  const [picking, setPicking] = useState(false);
+  // A flagged pick (said they can't / usually unavailable) gets a quick "sure?".
+  const [checking, setChecking] = useState<Worker | null>(null);
+  const first = name; // full name — "Test 2" shortened to "Test" was ambiguous
+
+  function pick(worker: Worker) {
+    const flag = flags[worker.id];
+    if (flag === "cant" || flag === "unavailable") setChecking(worker);
+    else {
+      onExchange(worker.id);
+      onClose();
+    }
+  }
+
+  return (
+    <Modal onClose={onClose} labelledBy="resolve-title">
+      <h2 id="resolve-title" className="text-base font-bold text-brite-white">
+        {name} is still on this shift
+      </h2>
+      {shift && <ShiftDateChip shift={shift} className="mt-2" />}
+
+      <div className="mt-4 flex flex-col gap-2">
+        {shift && (
+          <button
+            type="button"
+            autoFocus
+            onClick={() => {
+              onTakeOff(shift.id);
+              onClose();
+            }}
+            className="rounded-lg bg-brite-red py-2.5 text-sm font-semibold text-brite-white hover:bg-brite-red-bright"
+          >
+            Remove {first}
+          </button>
+        )}
+
+        <button
+          type="button"
+          onClick={() => {
+            setPicking((v) => !v);
+            setChecking(null);
+          }}
+          aria-expanded={picking}
+          className={`flex items-center justify-center gap-1.5 rounded-lg border py-2.5 text-sm font-semibold transition-colors ${
+            picking
+              ? "border-brite-amber/60 bg-brite-amber/10 text-brite-amber"
+              : "border-brite-tan/30 text-brite-cream hover:border-brite-tan"
+          }`}
+        >
+          Exchange
+          <svg
+            viewBox="0 0 24 24"
+            className={`h-4 w-4 transition-transform duration-200 ${picking ? "rotate-180" : ""}`}
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="m6 9 6 6 6-6" />
+          </svg>
+        </button>
+
+        {picking && !checking && (
+          <div className="rounded-lg border border-brite-tan/10 bg-brite-black/40 py-1.5">
+            <WorkerPickerList
+              workers={candidates}
+              onPick={(id) => {
+                const worker = candidates.find((w) => w.id === id);
+                if (worker) pick(worker);
+              }}
+              tagFor={(w) => {
+                const flag = flags[w.id];
+                return flag ? (
+                  <span
+                    className={`ml-auto shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${FLAG_TAG[flag].className}`}
+                  >
+                    {FLAG_TAG[flag].label}
+                  </span>
+                ) : null;
+              }}
+            />
+          </div>
+        )}
+
+        {checking && (
+          <div className="rounded-lg border border-brite-amber/30 bg-brite-amber/[0.07] p-3 text-center">
+            <div className="flex items-center justify-center gap-2 text-sm text-brite-white">
+              <Avatar name={checking.name} color={checking.avatarColor} size="sm" />
+              {flags[checking.id] === "cant"
+                ? `${checking.name} said they can't cover`
+                : `${checking.name} is usually unavailable${shift ? ` ${DAY_FULL_NAMES[dateToDayName(fromISODate(shift.date))]}s` : ""}`}
+            </div>
+            <div className="mt-2.5 flex justify-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  onExchange(checking.id);
+                  onClose();
+                }}
+                className="rounded-md bg-brite-amber px-3 py-1 text-xs font-semibold text-brite-black hover:brightness-110"
+              >
+                Assign anyway
+              </button>
+              <button
+                type="button"
+                onClick={() => setChecking(null)}
+                className="rounded-md border border-brite-tan/25 px-3 py-1 text-xs font-semibold text-brite-tan/80 hover:border-brite-tan/60"
+              >
+                Back
+              </button>
+            </div>
+          </div>
+        )}
+
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded-lg py-2 text-sm font-semibold text-brite-tan/55 hover:text-brite-tan"
+        >
+          Wait to resolve
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+/** 📅 Fri, Oct 30, 1–5:30 — the date line in the coverage dialogs. */
+function ShiftDateChip({ shift, className = "" }: { shift: Shift; className?: string }) {
+  return (
+    <div
+      className={`inline-flex items-center gap-2 rounded-lg border border-brite-tan/15 bg-brite-black/40 px-3 py-1.5 text-sm text-brite-cream ${className}`}
+    >
+      <svg viewBox="0 0 24 24" className="h-4 w-4 text-brite-red-bright" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="4" width="18" height="18" rx="2" />
+        <path d="M16 2v4M8 2v4M3 10h18" />
+      </svg>
+      {describeShift(shift)}
+    </div>
+  );
+}
+
+type DismissCoverageDialogProps = {
+  shift: Shift | undefined;
+  worker: Worker | undefined;
+  note?: string;
+  onDismiss: () => void;
+  onClose: () => void;
+};
+
+/** "Dismiss Test 2's request?" — confirms before throwing out a give-away request. */
+function DismissCoverageDialog({ shift, worker, note, onDismiss, onClose }: DismissCoverageDialogProps) {
+  const name = worker?.name ?? "this";
+  return (
+    <Modal onClose={onClose} labelledBy="dismiss-title">
+      <div className="flex flex-col items-center text-center">
+        {worker && (
+          <div className="relative mb-3">
+            <span className="absolute -inset-1.5 rounded-full bg-brite-amber/20 blur-md" />
+            <span className="relative block rounded-full ring-2 ring-brite-amber/50 ring-offset-2 ring-offset-brite-black-soft">
+              <Avatar name={worker.name} color={worker.avatarColor} />
+            </span>
+          </div>
+        )}
+        <h2 id="dismiss-title" className="text-base font-bold text-brite-white">
+          Dismiss {name}'s request?
+        </h2>
+        <p className="mt-0.5 text-xs text-brite-tan/50">Needs coverage for</p>
+        {shift && <ShiftDateChip shift={shift} className="mt-2" />}
+        {note && <p className="mt-2 text-xs italic text-brite-tan/55">“{note}”</p>}
+      </div>
+      <div className="mt-5 grid grid-cols-2 gap-2">
+        <button
+          type="button"
+          autoFocus
+          onClick={onClose}
+          className="rounded-lg border border-brite-tan/30 py-2.5 text-sm font-semibold text-brite-cream hover:border-brite-tan"
+        >
+          Keep
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            onDismiss();
+            onClose();
+          }}
+          className="rounded-lg bg-brite-red py-2.5 text-sm font-semibold text-brite-white hover:bg-brite-red-bright"
+        >
+          Dismiss
+        </button>
+      </div>
+    </Modal>
   );
 }

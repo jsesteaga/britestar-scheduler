@@ -12,7 +12,7 @@ import { formatCompactTime } from "../utils/time";
 import { ShiftTimeForm } from "./ShiftTimeForm";
 import { ShiftContextMenu, type CopyTarget, type ShiftMenuActions } from "./ShiftContextMenu";
 import { Avatar } from "./ui/Avatar";
-import { Popover } from "./ui/Popover";
+import { MenuDivider, MenuItem, MenuLabel, Popover } from "./ui/Popover";
 import { WorkerPickerList } from "./WorkerPickerList";
 
 type ShiftCardProps = {
@@ -26,9 +26,25 @@ type ShiftCardProps = {
   onDropOnShift: (payload: DragPayload, shiftId: string) => void;
   onDropOnWorker: (payload: DragPayload, shiftId: string, targetWorkerId: string) => void;
   onMoveShift: (shiftId: string, targetShiftId: string, position: DropEdge) => void;
+  coverage?: CoverageHighlight;
+  bartenderMenu?: BartenderMenu;
 };
 
 type MenuState = { x: number; y: number; focusWorkerId?: string };
+
+// How a shift is highlighted when someone's giving it away: amber while it
+// needs coverage, green on your own view if you offered to take it.
+export type CoverageHighlight = { tone: "amber" | "green"; label: string };
+
+// The bartender's own right-click / press-and-hold menu on a shift (managers
+// get the full ShiftContextMenu instead).
+export type BartenderMenu = {
+  title: string;
+  subtitle?: string;
+  items: { label: string; icon?: string; checked?: boolean; danger?: boolean; onClick: () => void }[];
+};
+
+const LONG_PRESS_MS = 500;
 type DropEdge = "before" | "after";
 
 export function ShiftCard({
@@ -42,7 +58,11 @@ export function ShiftCard({
   onDropOnShift,
   onDropOnWorker,
   onMoveShift,
+  coverage,
+  bartenderMenu,
 }: ShiftCardProps) {
+  const [workerMenu, setWorkerMenu] = useState<{ x: number; y: number } | null>(null);
+  const [pressTimer, setPressTimer] = useState<number | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   // While another shift card is dragged over this one: which half the cursor
   // is in, i.e. whether the dragged shift would land above or below this one.
@@ -56,7 +76,13 @@ export function ShiftCard({
   // shift menu instead of the browser's own. Chips call this too, passing
   // their worker so the menu leads with actions for that bartender.
   function openMenu(e: React.MouseEvent, focusWorkerId?: string) {
-    if (!isAdmin) return;
+    if (!isAdmin) {
+      if (!bartenderMenu) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setWorkerMenu({ x: e.clientX, y: e.clientY });
+      return;
+    }
     e.preventDefault();
     e.stopPropagation();
     setPicker(null);
@@ -93,6 +119,19 @@ export function ShiftCard({
         if (e.target === e.currentTarget) setIsBeingDragged(false);
       }}
       onContextMenu={(e) => openMenu(e)}
+      // Press-and-hold on touch screens (iPhones never fire contextmenu).
+      onTouchStart={
+        !isAdmin && bartenderMenu
+          ? (e) => {
+              const t = e.touches[0];
+              const at = { x: t.clientX, y: t.clientY };
+              setPressTimer(window.setTimeout(() => setWorkerMenu(at), LONG_PRESS_MS));
+            }
+          : undefined
+      }
+      onTouchEnd={() => pressTimer !== null && (window.clearTimeout(pressTimer), setPressTimer(null))}
+      onTouchMove={() => pressTimer !== null && (window.clearTimeout(pressTimer), setPressTimer(null))}
+      style={!isAdmin && bartenderMenu ? { WebkitTouchCallout: "none" } : undefined}
       onDragOver={
         isAdmin
           ? (e) => {
@@ -146,10 +185,14 @@ export function ShiftCard({
       } ${isAdmin ? "cursor-grab active:cursor-grabbing" : ""} ${
         isDragOver
           ? "border-l-brite-amber bg-brite-amber/10"
-          : menu
+          : menu || workerMenu
             ? "border-l-brite-amber bg-brite-black-soft/80"
-            : "border-l-brite-red-bright/60 bg-brite-black-soft/50"
-      }`}
+            : coverage?.tone === "green"
+              ? "border-l-brite-green bg-brite-green/[0.08] ring-1 ring-brite-green/40"
+              : coverage?.tone === "amber"
+                ? "border-l-brite-amber bg-brite-amber/[0.07] ring-1 ring-brite-amber/35"
+                : "border-l-brite-red-bright/60 bg-brite-black-soft/50"
+      } ${!isAdmin && bartenderMenu ? "select-none" : ""}`}
     >
       {dropEdge && (
         <div
@@ -199,6 +242,16 @@ export function ShiftCard({
           </div>
         )}
       </div>
+
+      {coverage && (
+        <div
+          className={`mb-1.5 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${
+            coverage.tone === "green" ? "bg-brite-green/15 text-brite-green" : "bg-brite-amber/15 text-brite-amber"
+          }`}
+        >
+          {coverage.tone === "green" ? "✓" : "●"} {coverage.label}
+        </div>
+      )}
 
       {assignedWorkers.length === 0 && (
         <span className="text-xs italic text-brite-tan/40">No one scheduled yet</span>
@@ -287,6 +340,30 @@ export function ShiftCard({
               setPicker(null);
             }}
           />
+        </Popover>
+      )}
+
+      {workerMenu && bartenderMenu && (
+        <Popover x={workerMenu.x} y={workerMenu.y} onClose={() => setWorkerMenu(null)} className="w-60">
+          <div className="px-3 pb-1 pt-0.5">
+            <div className="text-sm font-bold text-brite-white">{bartenderMenu.title}</div>
+            {bartenderMenu.subtitle && <div className="text-[11px] text-brite-tan/50">{bartenderMenu.subtitle}</div>}
+          </div>
+          <MenuDivider />
+          <MenuLabel>Your answer</MenuLabel>
+          {bartenderMenu.items.map((item) => (
+            <MenuItem
+              key={item.label}
+              icon={item.checked ? "✓" : (item.icon ?? "")}
+              label={item.label}
+              hint={item.checked ? "current" : undefined}
+              danger={item.danger}
+              onClick={() => {
+                item.onClick();
+                setWorkerMenu(null);
+              }}
+            />
+          ))}
         </Popover>
       )}
 

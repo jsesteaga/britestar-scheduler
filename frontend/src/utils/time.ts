@@ -25,3 +25,14 @@ export function formatCompactTime(display: string): string {
   const [, hour, minute] = match;
   return minute === "00" ? hour : `${hour}:${minute}`;
 }
+
+/** "Tue, Oct 21, 3:40 PM" — when a week's schedule was posted. */
+export function formatPostedAt(iso: string): string {
+  return new Date(iso).toLocaleString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}

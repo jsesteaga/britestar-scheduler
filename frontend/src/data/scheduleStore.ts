@@ -1,4 +1,12 @@
-import type { Availability, CoverageRequest, Shift, SwapRequest, TimeOffRequest } from "../types";
+import type {
+  AppNotification,
+  Availability,
+  CoverageRequest,
+  PostedWeek,
+  Shift,
+  SwapRequest,
+  TimeOffRequest,
+} from "../types";
 import { getMondayOfWeek, toISODate } from "../utils/week";
 import { generateShiftsForWeek, mockTimeOff } from "./mockSchedule";
 
@@ -18,6 +26,8 @@ const KEYS = {
   coverage: "britestar-coverage-requests",
   swap: "britestar-swap-requests",
   availability: "britestar-availability",
+  postedWeeks: "britestar-posted-weeks",
+  notifications: "britestar-notifications",
 } as const;
 
 function load<T>(key: string, fallback: T): T {
@@ -139,6 +149,13 @@ export const saveCoverageRequests = (requests: CoverageRequest[]) => save(KEYS.c
 
 export const getSwapRequests = () => load<SwapRequest[]>(KEYS.swap, []);
 export const saveSwapRequests = (requests: SwapRequest[]) => save(KEYS.swap, requests);
+
+export const getPostedWeeks = () => load<Record<string, PostedWeek>>(KEYS.postedWeeks, {});
+export const savePostedWeeks = (posted: Record<string, PostedWeek>) => save(KEYS.postedWeeks, posted);
+
+export const getNotifications = () => load<AppNotification[]>(KEYS.notifications, []);
+export const saveNotifications = (notifications: AppNotification[]) =>
+  save(KEYS.notifications, notifications);
 
 export const getAvailability = () => load<Availability[]>(KEYS.availability, []);
 export const saveAvailability = (availability: Availability[]) =>

@@ -94,7 +94,7 @@ function CopyFlyout({ anchorRef, targets, selected, onToggle, onSetAll, onCopy }
             : `Copy to ${selected.length} day${selected.length === 1 ? "" : "s"}`}
         </button>
         <p className="mt-1.5 text-[10px] leading-snug text-brite-tan/40">
-          Copies the time and bartenders. Anyone with approved time off that day is left off.
+          Time + bartenders · skips anyone off that day
         </p>
       </div>
     </div>

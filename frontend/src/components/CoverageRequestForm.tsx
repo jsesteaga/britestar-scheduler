@@ -5,6 +5,8 @@ import { formatFriendlyDate } from "../utils/week";
 import { Button } from "./ui/Button";
 
 type CoverageRequestFormProps = {
+  // Already narrowed to shifts they can give away: today or later, on a
+  // finalized week, and not already offered.
   myShifts: Shift[];
   onSubmit: (shiftId: string, note: string) => void;
   onCancel: () => void;
@@ -23,7 +25,8 @@ export function CoverageRequestForm({ myShifts, onSubmit, onCancel }: CoverageRe
   if (myShifts.length === 0) {
     return (
       <div className="mb-6 rounded-xl border border-brite-tan/15 bg-brite-black-soft/60 p-4 text-sm text-brite-tan/60">
-        You don't have any shifts this week to give away.{" "}
+        You don't have any upcoming shifts to give away. Only shifts from today on, on a
+        finalized schedule, can be given away.{" "}
         <button type="button" onClick={onCancel} className="font-semibold text-brite-tan hover:underline">
           Close
         </button>

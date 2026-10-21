@@ -148,9 +148,6 @@ export function DayEventNote({
               <h2 id="note-scope-title" className="text-base font-bold text-brite-white">
                 {removing ? `Remove the note from every ${dayName}?` : `Make this every ${dayName}?`}
               </h2>
-              <p className="text-xs text-brite-tan/50">
-                {removing ? "Or just clear it for this one day." : "Or keep it to just this one day."}
-              </p>
             </div>
           </div>
 

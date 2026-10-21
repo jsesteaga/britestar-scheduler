@@ -42,8 +42,7 @@ export function AvailabilityForm({ initialDays, onSubmit, onCancel }: Availabili
       className="mb-6 rounded-xl border border-brite-tan/15 bg-brite-black-soft/60 p-4"
     >
       <p className="mb-3 text-xs text-brite-tan/50">
-        Build out a general weekly availability pattern and send it to your manager. Uncheck a
-        day you're generally not available, and add a note for anything time-specific.
+        Uncheck days you usually can't work. Add a note for times.
       </p>
 
       <div className="flex flex-col gap-2">

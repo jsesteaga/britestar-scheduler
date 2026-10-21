@@ -66,7 +66,7 @@ export function SetAvailabilityPanel({
       ) : (
         <>
           <p className="mb-2 text-xs text-brite-tan/50">
-            Pick a day (or a range) you can't work. It goes to your manager as a time-off request.
+            Sent to your manager as a time-off request.
           </p>
           <RequestTimeOffForm onSubmit={onRequestTimeOff} onCancel={onClose} />
 

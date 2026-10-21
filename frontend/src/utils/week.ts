@@ -115,3 +115,25 @@ export function formatFriendlyDate(isoDate: string): string {
   const date = new Date(y, m - 1, d);
   return date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
 }
+
+/** The ISO date ("YYYY-MM-DD") of the Monday starting the week `isoDate` falls in — the key posted weeks are stored under. */
+export function mondayKeyFor(isoDate: string): string {
+  const [y, m, d] = isoDate.split("-").map(Number);
+  return toISODate(getMondayOfWeek(0, new Date(y, m - 1, d)));
+}
+
+/** Parses an ISO date ("YYYY-MM-DD") as a local calendar date (not UTC midnight). */
+export function fromISODate(isoDate: string): Date {
+  const [y, m, d] = isoDate.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+
+/** "Today", "Tomorrow", "in 3 days", "Yesterday", "2 days ago" — how soon a date is. */
+export function relativeDayLabel(isoDate: string, today: Date = new Date()): string {
+  const start = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const days = Math.round((fromISODate(isoDate).getTime() - start.getTime()) / 86_400_000);
+  if (days === 0) return "Today";
+  if (days === 1) return "Tomorrow";
+  if (days === -1) return "Yesterday";
+  return days > 0 ? `in ${days} days` : `${-days} days ago`;
+}
