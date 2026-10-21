@@ -1,0 +1,85 @@
+@import "tailwindcss";
+
+/*
+  This @theme block is how Tailwind v4 learns your design system.
+  Every `--color-*` variable below automatically becomes real Tailwind
+  utility classes: --color-brite-red gives you bg-brite-red, text-brite-red,
+  border-brite-red, etc. No tailwind.config.js needed for this.
+*/
+@theme {
+  --color-brite-black: #241d19;
+  --color-brite-black-soft: #362c25;
+  --color-brite-red: #ab3131;
+  --color-brite-red-bright: #d8503f;
+  --color-brite-amber: #e2a857;
+  --color-brite-green: #4f9c72;
+  --color-brite-cream: #f6ecdc;
+  --color-brite-tan: #e9d8bb;
+  --color-brite-white: #fffdf9;
+
+  --font-sans: "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+}
+
+/* Tells the browser the whole app is dark, so native widgets it draws itself
+   (time-picker icons, scrollbars, dropdown lists) come out dark too instead
+   of stark white. */
+:root {
+  color-scheme: dark;
+}
+
+/* Background stars (components/StarField.tsx): the whole layer fades in on
+   each week change, and some individual stars slowly pulse. The pulse uses
+   `scale` so it doesn't fight each star's own inline opacity. */
+@keyframes starfield-fade {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes starfield-twinkle {
+  50% {
+    scale: 0.6;
+    filter: brightness(1.6);
+  }
+}
+.starfield-fade {
+  animation: starfield-fade 0.6s ease-out;
+}
+.starfield-twinkle {
+  animation: starfield-twinkle 5s ease-in-out infinite;
+}
+/* Modal (components/ui/Modal.tsx): backdrop fades in, panel pops up. */
+@keyframes modal-fade {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes modal-pop {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.96);
+  }
+}
+.modal-backdrop {
+  animation: modal-fade 0.15s ease-out;
+}
+.modal-panel {
+  animation: modal-pop 0.2s cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .starfield-fade,
+  .starfield-twinkle,
+  .modal-backdrop,
+  .modal-panel {
+    animation: none;
+  }
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  background-color: var(--color-brite-black);
+  background-image: radial-gradient(circle at 15% 0%, rgba(216, 80, 63, 0.16), transparent 55%),
+    radial-gradient(circle at 85% 100%, rgba(226, 168, 87, 0.1), transparent 55%);
+  background-attachment: fixed;
+}
