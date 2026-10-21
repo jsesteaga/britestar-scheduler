@@ -139,6 +139,8 @@ export function SchedulePage() {
   const [generatedWeeks, setGeneratedWeeks] = useState<string[]>(() => getGeneratedWeeks());
   const [history, setHistory] = useState<Snapshot[]>([]);
   const [resolveConfirm, setResolveConfirm] = useState<CoverageRequest | null>(null);
+  // Opened from a shift's "Exchange bartender" menu item: start with the list open.
+  const [resolveStartPicking, setResolveStartPicking] = useState(false);
   const [dismissConfirm, setDismissConfirm] = useState<CoverageRequest | null>(null);
   const [dayEvents, setDayEventsRaw] = useState<DayEvents>(() => getDayEvents());
 
@@ -764,7 +766,11 @@ export function SchedulePage() {
   // amber + the offer count. Bartenders see amber (green if they offered),
   // and — for shifts today or later — a right-click / press-and-hold menu
   // to answer or change their answer.
-  function coverageFor(shift: Shift): { coverage?: CoverageHighlight; bartenderMenu?: BartenderMenu } {
+  function coverageFor(shift: Shift): {
+    coverage?: CoverageHighlight;
+    bartenderMenu?: BartenderMenu;
+    onExchange?: () => void;
+  } {
     const req = coverageRequests.find((r) => r.shiftId === shift.id);
     if (!req) return {};
     const answers = req.responses ?? [];
@@ -774,6 +780,11 @@ export function SchedulePage() {
         coverage: {
           tone: "amber",
           label: offers ? `Needs coverage · ${offers} offer${offers === 1 ? "" : "s"}` : "Needs coverage",
+        },
+        // Same as Mark resolved → Exchange, opened straight to the list.
+        onExchange: () => {
+          setResolveStartPicking(true);
+          setResolveConfirm(req);
         },
       };
     }
@@ -837,7 +848,10 @@ export function SchedulePage() {
   // on that shift, it isn't really covered yet — check with the manager first.
   function handleResolveCoverage(request: CoverageRequest) {
     const shift = shifts.find((s) => s.id === request.shiftId);
-    if (shift?.workerIds.includes(request.requestingWorkerId)) setResolveConfirm(request);
+    if (shift?.workerIds.includes(request.requestingWorkerId)) {
+      setResolveStartPicking(false);
+      setResolveConfirm(request);
+    }
     else handleRemoveCoverageRequest(request.id);
   }
 
@@ -1446,6 +1460,7 @@ export function SchedulePage() {
               handleRemoveWorkerFromShift(shiftId, resolveConfirm.requestingWorkerId)
             }
             onExchange={(workerId) => handleAssignCover(resolveConfirm, workerId)}
+            startPicking={resolveStartPicking}
             onClose={() => setResolveConfirm(null)}
           />
         )}
@@ -1524,6 +1539,7 @@ type ResolveCoverageDialogProps = {
   flags: Record<string, ExchangeFlag>;
   onTakeOff: (shiftId: string) => void;
   onExchange: (workerId: string) => void;
+  startPicking?: boolean;
   onClose: () => void;
 };
 
@@ -1538,9 +1554,10 @@ function ResolveCoverageDialog({
   flags,
   onTakeOff,
   onExchange,
+  startPicking = false,
   onClose,
 }: ResolveCoverageDialogProps) {
-  const [picking, setPicking] = useState(false);
+  const [picking, setPicking] = useState(startPicking);
   // A flagged pick (said they can't / usually unavailable) gets a quick "sure?".
   const [checking, setChecking] = useState<Worker | null>(null);
   const first = name; // full name — "Test 2" shortened to "Test" was ambiguous

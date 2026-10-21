@@ -28,6 +28,8 @@ type ShiftCardProps = {
   onMoveShift: (shiftId: string, targetShiftId: string, position: DropEdge) => void;
   coverage?: CoverageHighlight;
   bartenderMenu?: BartenderMenu;
+  // Manager only, when the shift needs coverage.
+  onExchange?: () => void;
 };
 
 type MenuState = { x: number; y: number; focusWorkerId?: string };
@@ -60,6 +62,7 @@ export function ShiftCard({
   onMoveShift,
   coverage,
   bartenderMenu,
+  onExchange,
 }: ShiftCardProps) {
   const [workerMenu, setWorkerMenu] = useState<{ x: number; y: number } | null>(null);
   const [pressTimer, setPressTimer] = useState<number | null>(null);
@@ -395,6 +398,7 @@ export function ShiftCard({
           focusWorkerId={menu.focusWorkerId}
           copyTargets={copyTargets}
           actions={actions}
+          onExchange={onExchange}
         />
       )}
     </div>

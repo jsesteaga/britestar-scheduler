@@ -123,6 +123,8 @@ type ShiftContextMenuProps = {
   focusWorkerId?: string;
   copyTargets: CopyTarget[];
   actions: ShiftMenuActions;
+  // Set when someone's giving this shift away — opens the exchange picker.
+  onExchange?: () => void;
 };
 
 type Expanded = "add" | null;
@@ -177,6 +179,7 @@ export function ShiftContextMenu({
   focusWorkerId,
   copyTargets,
   actions,
+  onExchange,
 }: ShiftContextMenuProps) {
   const [expanded, setExpanded] = useState<Expanded>(null);
   const [copyDates, setCopyDates] = useState<string[]>([]);
@@ -220,6 +223,14 @@ export function ShiftContextMenu({
           {formatCompactTime(shift.start)}–{formatCompactTime(shift.end)}
         </div>
       </div>
+
+      {onExchange && (
+        <>
+          <MenuDivider />
+          <MenuLabel>Needs coverage</MenuLabel>
+          <MenuItem icon="⇄" label="Exchange bartender" onClick={() => run(onExchange)} />
+        </>
+      )}
 
       <MenuDivider />
       <MenuLabel>Shift time</MenuLabel>
