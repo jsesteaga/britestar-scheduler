@@ -308,7 +308,7 @@ function RemoveBartenderDialog({ worker, upcomingShifts, onConfirm, onClose }: R
     <Modal onClose={onClose} labelledBy="remove-bartender-title">
       <div className="flex flex-col items-center text-center">
         <span className="mb-3 text-[10px] font-bold uppercase tracking-[0.3em] text-brite-tan/40">
-          ★ BriteStar Tavern ★
+          ★ Britestar Tavern ★
         </span>
         {/* Avatar with a soft red glow ring. */}
         <div className="relative mb-4">

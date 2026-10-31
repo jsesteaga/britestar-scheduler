@@ -14,8 +14,8 @@ export default defineConfig({
       // a production build — handy for previewing without a full deploy.
       devOptions: { enabled: true },
       manifest: {
-        name: 'BriteStar Scheduler',
-        short_name: 'BriteStar',
+        name: 'Britestar Scheduler',
+        short_name: 'Britestar',
         description: 'Britestar Tavern staff scheduling',
         start_url: '/',
         display: 'standalone',
