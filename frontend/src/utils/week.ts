@@ -1,4 +1,4 @@
-import type { Day } from "../types";
+import type { Day, Shift } from "../types";
 
 export const DAYS: Day[] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -111,15 +111,12 @@ export function toISODate(date: Date): string {
 
 /** "YYYY-MM-DD" -> "Sat, Sep 12". */
 export function formatFriendlyDate(isoDate: string): string {
-  const [y, m, d] = isoDate.split("-").map(Number);
-  const date = new Date(y, m - 1, d);
-  return date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  return fromISODate(isoDate).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
 }
 
 /** The ISO date ("YYYY-MM-DD") of the Monday starting the week `isoDate` falls in — the key posted weeks are stored under. */
 export function mondayKeyFor(isoDate: string): string {
-  const [y, m, d] = isoDate.split("-").map(Number);
-  return toISODate(getMondayOfWeek(0, new Date(y, m - 1, d)));
+  return toISODate(getMondayOfWeek(0, fromISODate(isoDate)));
 }
 
 /** Parses an ISO date ("YYYY-MM-DD") as a local calendar date (not UTC midnight). */
@@ -136,4 +133,14 @@ export function relativeDayLabel(isoDate: string, today: Date = new Date()): str
   if (days === 1) return "Tomorrow";
   if (days === -1) return "Yesterday";
   return days > 0 ? `in ${days} days` : `${-days} days ago`;
+}
+
+/**
+ * The shifts a swap would jump to on the schedule: both, if they're in the
+ * same week; otherwise just the earlier one (that's the week it opens on).
+ */
+export function swapFocus(a: Shift, b: Shift): { date: string; shiftIds: string[] } {
+  const [first, second] = a.date <= b.date ? [a, b] : [b, a];
+  const sameWeek = mondayKeyFor(first.date) === mondayKeyFor(second.date);
+  return { date: first.date, shiftIds: sameWeek ? [first.id, second.id] : [first.id] };
 }

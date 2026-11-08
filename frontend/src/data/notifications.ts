@@ -1,13 +1,13 @@
 import type { CoverageRequest, NotificationKind, Shift } from "../types";
-import { formatCompactTime } from "../utils/time";
-import { formatFriendlyDate } from "../utils/week";
+import { describeShift } from "../utils/time";
 
-export type PendingNotification = { workerId: string; kind: NotificationKind; text: string };
-
-/** "Thu, Oct 30, 1–5:30" */
-export function describeShift(shift: Shift): string {
-  return `${formatFriendlyDate(shift.date)}, ${formatCompactTime(shift.start)}–${formatCompactTime(shift.end)}`;
-}
+export type PendingNotification = {
+  workerId: string;
+  kind: NotificationKind;
+  text: string;
+  // The give-away request it's about, so it can be cleared when that request closes.
+  requestId?: string;
+};
 
 type DiffInput = {
   before: Shift[];

@@ -1,7 +1,6 @@
 import type { CoverageRequest, Shift, Worker } from "../types";
-import { formatCompactTime } from "../utils/time";
-import { formatFriendlyDate } from "../utils/week";
-import { CardButton, RequestCard } from "./RequestCard";
+import { describeShift } from "../utils/time";
+import { CardButton, OfferChip, RequestCard, type OpenTarget } from "./RequestCard";
 import { Avatar } from "./ui/Avatar";
 import { CardStack } from "./ui/CardStack";
 
@@ -11,17 +10,28 @@ type CoverageBoardProps = {
   workers: Worker[];
   me: Worker;
   todayISO: string;
-  onRespond: (requestId: string, canCover: boolean | null) => void;
-  onCancelMine: (requestId: string) => void;
+  onRespond: (requestId: string, canCover: boolean) => void;
+  onOpen: (target: OpenTarget) => void;
+  selectedKey?: string | null;
 };
 
 /**
- * What bartenders see of give-away requests: everyone's open shifts (soonest
- * on top) with "I can cover" / "Can't", plus their own requests and who's
- * offered to take them.
+ * Other bartenders' shifts up for grabs (soonest on top) that you could take
+ * and haven't answered yet. Your own give-aways live in "Your requests";
+ * once you answer one here it moves to your bell, and you can change it by
+ * right-clicking the shift on the schedule.
  */
-export function CoverageBoard({ requests, shifts, workers, me, todayISO, onRespond, onCancelMine }: CoverageBoardProps) {
-  const nameOf = (id: string) => workers.find((w) => w.id === id);
+export function CoverageBoard({
+  requests,
+  shifts,
+  workers,
+  me,
+  todayISO,
+  onRespond,
+  onOpen,
+  selectedKey,
+}: CoverageBoardProps) {
+  const byId = (id: string) => workers.find((w) => w.id === id);
 
   const items = requests
     .map((r) => ({ r, shift: shifts.find((s) => s.id === r.shiftId) }))
@@ -29,24 +39,17 @@ export function CoverageBoard({ requests, shifts, workers, me, todayISO, onRespo
       (x): x is { r: CoverageRequest; shift: Shift } =>
         !!x.shift &&
         x.shift.date >= todayISO &&
-        // Your own requests always show. Others' drop off once you're on
-        // that shift or you've answered (your answer lives in the bell, and
-        // you can change it by right-clicking the shift on the schedule).
-        (x.r.requestingWorkerId === me.id ||
-          (!x.shift.workerIds.includes(me.id) && !(x.r.responses ?? []).some((a) => a.workerId === me.id))),
+        x.r.requestingWorkerId !== me.id &&
+        !x.shift.workerIds.includes(me.id) &&
+        !(x.r.responses ?? []).some((a) => a.workerId === me.id),
     )
     .sort((a, b) => a.shift.date.localeCompare(b.shift.date))
     .map(({ r, shift }) => {
-      const requester = nameOf(r.requestingWorkerId);
-      const responses = r.responses ?? [];
-      // Other people's offers — your own answer already shows by the buttons.
-      const offers = responses
-        .filter((x) => x.canCover && x.workerId !== me.id)
-        .map((x) => nameOf(x.workerId))
+      const requester = byId(r.requestingWorkerId);
+      const offers = (r.responses ?? [])
+        .filter((x) => x.canCover)
+        .map((x) => byId(x.workerId))
         .filter((w): w is Worker => !!w);
-      const mine = r.requestingWorkerId === me.id;
-      const myAnswer = responses.find((x) => x.workerId === me.id);
-      const when = `${formatFriendlyDate(shift.date)}, ${formatCompactTime(shift.start)}–${formatCompactTime(shift.end)}`;
 
       return {
         key: r.id,
@@ -54,73 +57,31 @@ export function CoverageBoard({ requests, shifts, workers, me, todayISO, onRespo
           <RequestCard
             kind="coverage"
             date={shift.date}
+            onOpen={() => onOpen({ key: `grab-${r.id}`, date: shift.date, shiftIds: [shift.id] })}
+            selected={selectedKey === `grab-${r.id}`}
             title={
-              mine ? (
+              <>
+                {requester && <Avatar name={requester.name} color={requester.avatarColor} size="sm" />}
                 <span>
-                  <b className="font-semibold">Your shift</b> is up for grabs
+                  <b className="font-semibold">{requester?.name ?? "Someone"}</b> needs coverage
                 </span>
-              ) : (
-                <>
-                  {requester && <Avatar name={requester.name} color={requester.avatarColor} size="sm" />}
-                  <span>
-                    <b className="font-semibold">{requester?.name ?? "Someone"}</b> needs coverage
-                  </span>
-                </>
-              )
+              </>
             }
-            subtitle={[when, r.note && `“${r.note}”`].filter(Boolean).join(" · ")}
+            subtitle={[describeShift(shift), r.note && `“${r.note}”`].filter(Boolean).join(" · ")}
             actions={
-              mine ? (
-                <CardButton onClick={() => onCancelMine(r.id)}>Cancel request</CardButton>
-              ) : myAnswer ? (
-                <>
-                  <span
-                    className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                      myAnswer.canCover ? "bg-brite-green/15 text-brite-green" : "bg-brite-tan/10 text-brite-tan/60"
-                    }`}
-                  >
-                    {myAnswer.canCover ? "✓ You offered to cover" : "You passed"}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => onRespond(r.id, null)}
-                    className="text-xs font-semibold text-brite-tan/45 hover:text-brite-tan"
-                  >
-                    Change
-                  </button>
-                </>
-              ) : (
-                <>
-                  <CardButton variant="primary" onClick={() => onRespond(r.id, true)}>
-                    I can cover
-                  </CardButton>
-                  <CardButton onClick={() => onRespond(r.id, false)}>Can't</CardButton>
-                </>
-              )
+              <>
+                <CardButton variant="primary" onClick={() => onRespond(r.id, true)}>
+                  I can cover
+                </CardButton>
+                <CardButton onClick={() => onRespond(r.id, false)}>Can't</CardButton>
+              </>
             }
             footer={
-              offers.length > 0 || mine ? (
+              offers.length > 0 ? (
                 <div className="flex flex-wrap items-center gap-2">
-                  {offers.length === 0 ? (
-                    <span className="text-xs italic text-brite-tan/40">
-                      No offers yet
-                    </span>
-                  ) : (
-                    offers.map((w) => (
-                      <span
-                        key={w.id}
-                        className="flex items-center gap-1.5 rounded-full border border-brite-green/30 bg-brite-green/10 py-0.5 pl-0.5 pr-2.5"
-                      >
-                        <Avatar name={w.name} color={w.avatarColor} size="sm" />
-                        <span className="text-xs text-brite-white">
-                          {w.name} offered to cover!
-                        </span>
-                      </span>
-                    ))
-                  )}
-                  {mine && offers.length > 0 && (
-                    <span className="text-xs text-brite-tan/45">Your manager will confirm.</span>
-                  )}
+                  {offers.map((w) => (
+                    <OfferChip key={w.id} worker={w} label={`${w.name} offered to cover!`} />
+                  ))}
                 </div>
               ) : undefined
             }

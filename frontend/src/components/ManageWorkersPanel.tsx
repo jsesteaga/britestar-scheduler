@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { HoldDrag } from "../hooks/useHoldDrag";
 import type { Worker } from "../types";
 import { getRosterDrag, isRosterDrag, setDragPayload, setRosterDrag } from "../utils/dnd";
 import { Avatar } from "./ui/Avatar";
@@ -17,6 +18,11 @@ type ManageWorkersPanelProps = {
   upcomingShiftCount: (workerId: string) => number;
   onReorder: (workerId: string, targetId: string, side: Side) => void;
   onRename: (workerId: string, name: string) => void;
+  // Press-and-hold dragging (see useHoldDrag): touch screens always use it.
+  // holdDragMouse: the mouse uses it too — on narrow screens, where the week
+  // is the compact grid, which only takes press-and-hold drops.
+  holdDrag?: HoldDrag;
+  holdDragMouse?: boolean;
 };
 
 type MenuState = { x: number; y: number; workerId: string };
@@ -28,7 +34,11 @@ export function ManageWorkersPanel({
   upcomingShiftCount,
   onReorder,
   onRename,
+  holdDrag,
+  holdDragMouse = false,
 }: ManageWorkersPanelProps) {
+  // A roster name being press-and-hold dragged, if any.
+  const held = holdDrag?.dragged?.kind === "person" && !holdDrag.dragged.fromShiftId ? holdDrag.dragged : null;
   const [username, setUsername] = useState("");
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [removing, setRemoving] = useState<Worker | null>(null);
@@ -59,17 +69,51 @@ export function ManageWorkersPanel({
         <span className="text-xs text-brite-tan/40">{workers.length} on the roster</span>
       </div>
       <p className="mb-3 text-xs text-brite-tan/50">
-        Drag onto a shift to schedule · drag between names to reorder · right-click for more
+        <span className="sm:hidden pointer-fine:hidden">
+          Hold a name, then drag it onto a shift · swipe for more names · tap one for options
+        </span>
+        <span className="hidden sm:inline pointer-fine:inline">
+          Drag a name onto a shift to schedule it, or between names to reorder (on a touch screen, press and hold
+          first) · tap a name for more
+        </span>
       </p>
 
-      <div className="mb-4 flex flex-wrap gap-2">
+      {/* Phones: one row you swipe sideways, so the panel stays short and the
+          week is right below it to drag onto. Wider screens — and anything
+          with a mouse, which can't swipe — get names that wrap instead. */}
+      <div
+        data-hold-scroll-x
+        className="-mx-4 mb-4 flex gap-2 overflow-x-auto px-4 py-1 [scrollbar-width:none] sm:mx-0 sm:flex-wrap sm:overflow-visible sm:px-0 sm:py-0 pointer-fine:mx-0 pointer-fine:flex-wrap pointer-fine:overflow-visible pointer-fine:px-0 pointer-fine:py-0"
+      >
         {workers.map((worker) => {
           const shownName = worker.name;
-          const edge = dropTarget?.id === worker.id ? dropTarget.side : null;
+          const edge =
+            dropTarget?.id === worker.id
+              ? dropTarget.side
+              : held && held.workerId !== worker.id && holdDrag?.target?.rosterId === worker.id
+                ? holdDrag.target.side
+                : null;
           return (
             <div
               key={worker.id}
-              draggable
+              data-drop-roster={worker.id}
+              draggable={!holdDragMouse}
+              onPointerDown={
+                holdDrag
+                  ? (e) =>
+                      holdDrag.start(
+                        e,
+                        { kind: "person", workerId: worker.id, name: shownName, color: worker.avatarColor },
+                        { touchOnly: !holdDragMouse },
+                      )
+                  : undefined
+              }
+              // Tap (or click) a name for its menu — right-click works too.
+              onClick={(e) => {
+                if (holdDrag?.isBusy()) return;
+                const rect = e.currentTarget.getBoundingClientRect();
+                setMenu({ x: rect.left, y: rect.bottom + 4, workerId: worker.id });
+              }}
               onDragStart={(e) => {
                 // Carries both: a "roster" payload so it can still be
                 // dropped onto a shift, and a reorder marker for this panel.
@@ -100,11 +144,12 @@ export function ManageWorkersPanel({
               }}
               onContextMenu={(e) => {
                 e.preventDefault();
+                if (holdDrag?.isBusy()) return; // Android's long press, mid-drag
                 setMenu({ x: e.clientX, y: e.clientY, workerId: worker.id });
               }}
               title={`Login: ${worker.username}`}
-              className={`relative flex cursor-grab items-center gap-2 rounded-full border py-1 pl-1.5 pr-3 active:cursor-grabbing ${
-                draggingId === worker.id ? "opacity-40" : ""
+              className={`relative flex shrink-0 cursor-grab select-none items-center gap-2 rounded-full border py-1 pl-1.5 pr-3 [-webkit-touch-callout:none] active:cursor-grabbing ${
+                draggingId === worker.id || held?.workerId === worker.id ? "opacity-40" : ""
               } ${
                 menu?.workerId === worker.id
                   ? "border-brite-amber/60 bg-brite-amber/10"
@@ -125,9 +170,12 @@ export function ManageWorkersPanel({
               )}
               <button
                 type="button"
-                onClick={() => setRemoving(worker)}
+                onClick={(e) => {
+                  e.stopPropagation(); // not also the name's menu
+                  setRemoving(worker);
+                }}
                 aria-label={`Remove ${shownName}`}
-                className="text-brite-tan/50 hover:text-brite-red-bright"
+                className="text-brite-tan/50 hover:text-brite-red-bright pointer-coarse:-my-1 pointer-coarse:px-1 pointer-coarse:py-1"
               >
                 ✕
               </button>
@@ -308,7 +356,7 @@ function RemoveBartenderDialog({ worker, upcomingShifts, onConfirm, onClose }: R
     <Modal onClose={onClose} labelledBy="remove-bartender-title">
       <div className="flex flex-col items-center text-center">
         <span className="mb-3 text-[10px] font-bold uppercase tracking-[0.3em] text-brite-tan/40">
-          ★ BriteStar Tavern ★
+          ★ Britestar Tavern ★
         </span>
         {/* Avatar with a soft red glow ring. */}
         <div className="relative mb-4">

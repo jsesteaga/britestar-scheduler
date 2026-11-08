@@ -17,6 +17,10 @@ export function RequestTimeOffForm({ onSubmit, onCancel }: RequestTimeOffFormPro
   function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
     if (!startDate || !endDate) return;
+    if (startDate < today) {
+      setError("Pick today or a later date.");
+      return;
+    }
     if (endDate < startDate) {
       setError("End date can't be before the start date.");
       return;
@@ -36,6 +40,7 @@ export function RequestTimeOffForm({ onSubmit, onCancel }: RequestTimeOffFormPro
         <input
           id="timeoff-start"
           type="date"
+          min={today}
           value={startDate}
           onChange={(e) => {
             setStartDate(e.target.value);
@@ -52,6 +57,7 @@ export function RequestTimeOffForm({ onSubmit, onCancel }: RequestTimeOffFormPro
         <input
           id="timeoff-end"
           type="date"
+          min={startDate || today}
           value={endDate}
           onChange={(e) => {
             setEndDate(e.target.value);

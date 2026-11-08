@@ -1,12 +1,13 @@
 import { useState, type ReactNode } from "react";
 import type { AppNotification, NotificationKind } from "../types";
-import { Modal } from "./ui/Modal";
 import { Popover } from "./ui/Popover";
 
 type NotificationCenterProps = {
   // Just this bartender's notifications, newest first.
   notifications: AppNotification[];
   onMarkAllRead: () => void;
+  // Hovering an unread note marks just that one read (its red dot goes away).
+  onMarkRead: (id: string) => void;
   onClearAll: () => void;
   // Optional buttons under a notification (e.g. "Actually, I can cover").
   actionsFor?: (n: AppNotification) => ReactNode;
@@ -22,6 +23,7 @@ const KIND_STYLE: Record<NotificationKind, { icon: string; className: string }> 
   "needs-coverage": { icon: "!", className: "bg-brite-amber/15 text-brite-amber" },
   offer: { icon: "♥", className: "bg-brite-green/15 text-brite-green" },
   response: { icon: "↩", className: "bg-brite-tan/10 text-brite-tan" },
+  swap: { icon: "⇄", className: "bg-brite-amber/15 text-brite-amber" },
   removed: { icon: "−", className: "bg-brite-red/20 text-brite-red-bright" },
 };
 
@@ -34,10 +36,18 @@ function timeAgo(iso: string): string {
   return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-function NotificationRow({ n, actions }: { n: AppNotification; actions?: ReactNode }) {
+function NotificationRow({
+  n,
+  actions,
+  onSeen,
+}: {
+  n: AppNotification;
+  actions?: ReactNode;
+  onSeen?: () => void;
+}) {
   const style = KIND_STYLE[n.kind];
   return (
-    <div className="flex gap-2.5 px-3 py-2">
+    <div className="flex gap-2.5 px-3 py-2" onMouseEnter={onSeen}>
       <span
         className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-bold ${style.className}`}
       >
@@ -54,19 +64,18 @@ function NotificationRow({ n, actions }: { n: AppNotification; actions?: ReactNo
 }
 
 /**
- * A bartender's schedule updates: a pop-up of anything new when they open
- * the app, plus a bell in the header to look back through them later.
+ * A bartender's schedule updates, in a bell in the header. New ones show as
+ * a red count on the bell (no pop-up on login); opening it marks them read.
  */
-export function NotificationCenter({ notifications, onMarkAllRead, onClearAll, actionsFor }: NotificationCenterProps) {
+export function NotificationCenter({
+  notifications,
+  onMarkAllRead,
+  onMarkRead,
+  onClearAll,
+  actionsFor,
+}: NotificationCenterProps) {
   const unread = notifications.filter((n) => !n.read);
-  // Decided once, on arrival: if there's news waiting, lead with it.
-  const [showPopup, setShowPopup] = useState(() => unread.length > 0);
   const [list, setList] = useState<{ x: number; y: number } | null>(null);
-
-  function closePopup() {
-    setShowPopup(false);
-    onMarkAllRead();
-  }
 
   return (
     <>
@@ -120,43 +129,18 @@ export function NotificationCenter({ notifications, onMarkAllRead, onClearAll, a
           ) : (
             <div className="max-h-96 overflow-y-auto">
               {notifications.slice(0, 30).map((n) => (
-                <NotificationRow key={n.id} n={n} actions={actionsFor?.(n)} />
+                <NotificationRow
+                  key={n.id}
+                  n={n}
+                  actions={actionsFor?.(n)}
+                  onSeen={n.read ? undefined : () => onMarkRead(n.id)}
+                />
               ))}
             </div>
           )}
         </Popover>
       )}
 
-      {showPopup && unread.length > 0 && (
-        <Modal onClose={closePopup} labelledBy="updates-title">
-          <div className="mb-3 flex items-center gap-2.5">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-brite-amber/15 text-lg text-brite-amber">
-              ★
-            </span>
-            <div>
-              <h2 id="updates-title" className="text-base font-bold text-brite-white">
-                Schedule update{unread.length === 1 ? "" : "s"}
-              </h2>
-              <p className="text-xs text-brite-tan/50">
-                {unread.length} new since you last checked
-              </p>
-            </div>
-          </div>
-          <div className="-mx-3 mb-4 max-h-72 overflow-y-auto">
-            {unread.map((n) => (
-              <NotificationRow key={n.id} n={n} />
-            ))}
-          </div>
-          <button
-            type="button"
-            autoFocus
-            onClick={closePopup}
-            className="w-full rounded-lg bg-brite-red py-2.5 text-sm font-semibold text-brite-white hover:bg-brite-red-bright"
-          >
-            Got it
-          </button>
-        </Modal>
-      )}
     </>
   );
 }

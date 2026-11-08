@@ -6,6 +6,9 @@ type PopoverProps = {
   x: number;
   y: number;
   onClose: () => void;
+  // Escape normally just closes too; pass this when Escape should mean
+  // "cancel" and clicking away should mean something else (e.g. "save").
+  onEscape?: () => void;
   children: ReactNode;
   className?: string;
 };
@@ -17,7 +20,7 @@ const EDGE_MARGIN = 8;
  * by a parent's `overflow-hidden` (shift cards have one). Closes on Escape
  * or on any pointer press outside it.
  */
-export function Popover({ x, y, onClose, children, className = "" }: PopoverProps) {
+export function Popover({ x, y, onClose, onEscape, children, className = "" }: PopoverProps) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ left: x, top: y });
 
@@ -45,7 +48,7 @@ export function Popover({ x, y, onClose, children, className = "" }: PopoverProp
       if (ref.current && !ref.current.contains(e.target as Node)) onClose();
     }
     function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") (onEscape ?? onClose)();
     }
     document.addEventListener("pointerdown", handlePointerDown, true);
     document.addEventListener("keydown", handleKeyDown);
@@ -55,7 +58,7 @@ export function Popover({ x, y, onClose, children, className = "" }: PopoverProp
       document.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("resize", onClose);
     };
-  }, [onClose]);
+  }, [onClose, onEscape]);
 
   return createPortal(
     <div
@@ -69,7 +72,8 @@ export function Popover({ x, y, onClose, children, className = "" }: PopoverProp
         e.preventDefault();
         e.stopPropagation();
       }}
-      className={`fixed z-50 max-h-[calc(100vh-16px)] overflow-y-auto rounded-xl border border-brite-tan/15 bg-brite-black-soft py-1.5 text-brite-cream shadow-2xl shadow-black/60 ${className}`}
+      // z-[65]: above Modal/Sheet (z-60), since menus open from inside them too.
+      className={`fixed z-[65] max-h-[calc(100dvh-16px)] overflow-y-auto rounded-xl border border-brite-tan/15 bg-brite-black-soft py-1.5 text-brite-cream shadow-2xl shadow-black/60 ${className}`}
     >
       {children}
     </div>,

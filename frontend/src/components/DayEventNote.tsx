@@ -78,7 +78,8 @@ export function DayEventNote({
         onClick={() => setDraft(text)}
         title={isOneOff ? `Just for ${dateLabel} — click to edit` : `Every ${dayName} — click to edit`}
         className={`w-full rounded-md px-1 py-0.5 text-[10px] font-semibold leading-tight transition-colors hover:bg-brite-amber/10 ${
-          text ? "text-brite-amber" : "text-transparent group-hover/day:text-brite-tan/35"
+          // Touch screens can't hover, so the "+ Add note" hint stays faintly visible there.
+          text ? "text-brite-amber" : "text-transparent group-hover/day:text-brite-tan/35 pointer-coarse:text-brite-tan/35"
         } ${editing ? "invisible" : ""}`}
       >
         {text || "+ Add note"}

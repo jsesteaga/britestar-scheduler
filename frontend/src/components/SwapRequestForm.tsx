@@ -34,7 +34,7 @@ export function SwapRequestForm({ myShifts, otherWorkers, shifts, onSubmit, onCa
   if (myShifts.length === 0) {
     return (
       <div className="mb-6 rounded-xl border border-brite-tan/15 bg-brite-black-soft/60 p-4 text-sm text-brite-tan/60">
-        You don't have any shifts this week to swap.{" "}
+        You don't have any upcoming shifts to swap.{" "}
         <button type="button" onClick={onCancel} className="font-semibold text-brite-tan hover:underline">
           Close
         </button>

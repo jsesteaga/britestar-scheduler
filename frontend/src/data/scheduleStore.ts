@@ -9,6 +9,7 @@ import type {
 } from "../types";
 import { getMondayOfWeek, toISODate } from "../utils/week";
 import { generateShiftsForWeek, mockTimeOff } from "./mockSchedule";
+import { readJSON, writeJSON } from "./storage";
 
 /**
  * Same DEMO-ONLY localStorage pattern as `data/workers.ts` — this is the
@@ -30,24 +31,15 @@ const KEYS = {
   notifications: "britestar-notifications",
 } as const;
 
+// Missing keys get seeded with their default, so first-time setup is saved.
 function load<T>(key: string, fallback: T): T {
-  try {
-    const raw = localStorage.getItem(key);
-    if (raw) return JSON.parse(raw) as T;
-  } catch {
-    // fall through to seeding defaults below
-  }
-  save(key, fallback);
+  const stored = readJSON<T>(key);
+  if (stored !== null) return stored;
+  writeJSON(key, fallback);
   return fallback;
 }
 
-function save<T>(key: string, value: T): void {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-  } catch {
-    // localStorage unavailable (private browsing, etc.) — changes just won't persist
-  }
-}
+const save = writeJSON;
 
 type LegacyShift = Partial<Shift> & { day?: string };
 
@@ -69,7 +61,10 @@ export function getShifts(): Shift[] {
     saveGeneratedWeeks([toISODate(monday)]);
     return fresh;
   }
-  return loaded as Shift[];
+  // An older swap bug could list someone on a shift twice — tidy that up.
+  return (loaded as Shift[]).map((s) =>
+    new Set(s.workerIds).size === s.workerIds.length ? s : { ...s, workerIds: [...new Set(s.workerIds)] },
+  );
 }
 export const saveShifts = (shifts: Shift[]) => save(KEYS.shifts, shifts);
 

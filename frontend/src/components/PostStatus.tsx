@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { formatPostedAt } from "../utils/time";
-import { Button } from "./ui/Button";
+import { Button, ShortLabel } from "./ui/Button";
 import { Modal } from "./ui/Modal";
 
 // "draft": work in progress — bartenders see it blurred.
@@ -8,7 +8,7 @@ import { Modal } from "./ui/Modal";
 // "changed": finalized, then edited since (bartenders already see the edits).
 export type PostState = "draft" | "posted" | "changed";
 
-type ManagerPostBarProps = {
+type FinalizeButtonProps = {
   state: PostState;
   postedAt?: string;
   changeCount: number;
@@ -23,14 +23,14 @@ type ManagerPostBarProps = {
  * small green "Finalized" pill once it's done (click it to move the week
  * back), and "Finalize changes" if it's been edited since.
  */
-export function ManagerPostBar({
+export function FinalizeButton({
   state,
   postedAt,
   changeCount,
   weekLabel,
   onPost,
   onUnpost,
-}: ManagerPostBarProps) {
+}: FinalizeButtonProps) {
   const [confirm, setConfirm] = useState<"post" | "unpost" | null>(null);
 
   return (
@@ -40,13 +40,13 @@ export function ManagerPostBar({
           type="button"
           onClick={() => setConfirm("unpost")}
           title={postedAt ? `Finalized ${formatPostedAt(postedAt)} — click to move back to work in progress` : undefined}
-          className="rounded-lg border border-brite-green/40 bg-brite-green/10 px-4 py-2.5 font-semibold tracking-wide text-brite-green transition-colors hover:border-brite-green"
+          className="rounded-lg border border-brite-green/40 bg-brite-green/10 px-3 py-1.5 text-xs font-semibold text-brite-green transition-colors hover:border-brite-green sm:text-sm"
         >
           ✓ Finalized
         </button>
       ) : (
         <Button
-          className="w-auto px-4"
+          size="sm"
           onClick={() => setConfirm("post")}
           title={
             state === "draft"
@@ -56,7 +56,7 @@ export function ManagerPostBar({
                 : undefined
           }
         >
-          {state === "draft" ? "Finalize schedule" : "Finalize changes"}
+          <ShortLabel short="Finalize" long={state === "draft" ? "Finalize schedule" : "Finalize changes"} />
           {state === "changed" && (
             <span className="ml-2 rounded-full bg-brite-white/20 px-1.5 text-xs">{changeCount}</span>
           )}

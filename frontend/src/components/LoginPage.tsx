@@ -1,11 +1,19 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { checkManagerPassword, checkWorkerLogin } from "../auth/credentials";
+import { readJSON, writeJSON } from "../data/storage";
+import { useMediaQuery } from "../hooks/useMediaQuery";
+import { canOfferInstall, useInstallState } from "../pwa/install";
+import { AddToHomeButton, InstallWelcome } from "./InstallAppPrompt";
 import { BritestarLogo } from "./BritestarLogo";
 import { Button } from "./ui/Button";
 import { TextField } from "./ui/TextField";
 
 type LoginRole = "worker" | "admin";
+
+// Set once someone picks "Add to Home Screen" or "Continue on web", so the
+// welcome screen only greets them the first time.
+const WELCOME_SEEN_KEY = "britestar.installWelcomeSeen";
 
 export function LoginPage() {
   const [role, setRole] = useState<LoginRole>("worker");
@@ -14,6 +22,18 @@ export function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
+
+  // Phones that haven't installed the app see a welcome screen first (see
+  // InstallWelcome). Computers just get the small top-right button.
+  const install = useInstallState();
+  const isTouch = useMediaQuery("(pointer: coarse)");
+  const [welcomeSeen, setWelcomeSeen] = useState(() => readJSON<boolean>(WELCOME_SEEN_KEY) === true);
+  const showWelcome = isTouch && !welcomeSeen && canOfferInstall(install);
+
+  function finishWelcome() {
+    writeJSON(WELCOME_SEEN_KEY, true);
+    setWelcomeSeen(true);
+  }
 
   function selectRole(nextRole: LoginRole) {
     setRole(nextRole);
@@ -50,78 +70,89 @@ export function LoginPage() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-brite-black px-4">
+    <div className="relative flex min-h-screen items-center justify-center bg-brite-black px-4 py-16">
+      {!showWelcome && (
+        <div className="absolute right-4 top-4">
+          <AddToHomeButton />
+        </div>
+      )}
       <div className="w-full max-w-sm rounded-2xl border border-brite-tan/15 bg-brite-black-soft/60 p-8 shadow-2xl">
         <div className="mb-8 flex justify-center">
           <BritestarLogo />
         </div>
 
-        <div className="mb-6 grid grid-cols-2 gap-2 rounded-lg bg-brite-black p-1">
-          <button
-            type="button"
-            onClick={() => selectRole("worker")}
-            className={`rounded-md py-2 text-sm font-semibold transition-colors ${
-              role === "worker"
-                ? "bg-brite-red text-brite-white"
-                : "text-brite-tan/60 hover:text-brite-tan"
-            }`}
-          >
-            Worker
-          </button>
-          <button
-            type="button"
-            onClick={() => selectRole("admin")}
-            className={`rounded-md py-2 text-sm font-semibold transition-colors ${
-              role === "admin"
-                ? "bg-brite-red text-brite-white"
-                : "text-brite-tan/60 hover:text-brite-tan"
-            }`}
-          >
-            Manager
-          </button>
-        </div>
+        {showWelcome ? (
+          <InstallWelcome onDone={finishWelcome} />
+        ) : (
+          <>
+          <div className="mb-6 grid grid-cols-2 gap-2 rounded-lg bg-brite-black p-1">
+            <button
+              type="button"
+              onClick={() => selectRole("worker")}
+              className={`rounded-md py-2 text-sm font-semibold transition-colors ${
+                role === "worker"
+                  ? "bg-brite-red text-brite-white"
+                  : "text-brite-tan/60 hover:text-brite-tan"
+              }`}
+            >
+              Worker
+            </button>
+            <button
+              type="button"
+              onClick={() => selectRole("admin")}
+              className={`rounded-md py-2 text-sm font-semibold transition-colors ${
+                role === "admin"
+                  ? "bg-brite-red text-brite-white"
+                  : "text-brite-tan/60 hover:text-brite-tan"
+              }`}
+            >
+              Manager
+            </button>
+          </div>
 
-        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-          {role === "worker" && (
+          <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+            {role === "worker" && (
+              <TextField
+                id="username"
+                label="Username"
+                autoComplete="username"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+              />
+            )}
+
             <TextField
-              id="username"
-              label="Username"
-              autoComplete="username"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
+              id="password"
+              label="Password"
+              type={showPassword ? "text" : "password"}
+              autoComplete="current-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
             />
-          )}
+            <label className="flex items-center gap-2 text-xs text-brite-tan/70">
+              <input
+                type="checkbox"
+                checked={showPassword}
+                onChange={() => setShowPassword((current) => !current)}
+              />
+              Show password
+            </label>
 
-          <TextField
-            id="password"
-            label="Password"
-            type={showPassword ? "text" : "password"}
-            autoComplete="current-password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-          />
-          <label className="flex items-center gap-2 text-xs text-brite-tan/70">
-            <input
-              type="checkbox"
-              checked={showPassword}
-              onChange={() => setShowPassword((current) => !current)}
-            />
-            Show password
-          </label>
+            {error && <p className="text-sm text-brite-red-bright">{error}</p>}
 
-          {error && <p className="text-sm text-brite-red-bright">{error}</p>}
+            {role === "worker" && (
+              <p className="text-xs text-brite-tan/50">
+                First time signing in? Use the temporary password your manager gave you —
+                you'll be asked to set your own right after.
+              </p>
+            )}
 
-          {role === "worker" && (
-            <p className="text-xs text-brite-tan/50">
-              First time signing in? Use the temporary password your manager gave you —
-              you'll be asked to set your own right after.
-            </p>
-          )}
-
-          <Button type="submit" className="mt-2 w-full">
-            {role === "admin" ? "Manager Sign In" : "Worker Sign In"}
-          </Button>
-        </form>
+            <Button type="submit" className="mt-2 w-full">
+              {role === "admin" ? "Manager Sign In" : "Worker Sign In"}
+            </Button>
+          </form>
+          </>
+        )}
       </div>
     </div>
   );

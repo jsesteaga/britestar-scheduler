@@ -110,6 +110,21 @@
   animation-iteration-count: infinite;
 }
 
+/* "Here it is" pulse on a shift card after jumping to it from a request. */
+@keyframes shift-flash {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(226, 168, 87, 0);
+  }
+  25%,
+  65% {
+    box-shadow: 0 0 0 3px rgba(226, 168, 87, 0.75), 0 0 22px 2px rgba(226, 168, 87, 0.35);
+  }
+}
+.shift-flash {
+  animation: shift-flash 1.1s ease-in-out 2;
+}
+
 /* Modal (components/ui/Modal.tsx): backdrop fades in, panel pops up. */
 @keyframes modal-fade {
   from {
@@ -129,7 +144,41 @@
   animation: modal-pop 0.2s cubic-bezier(0.2, 0.9, 0.3, 1.2);
 }
 
+/* Sheet (components/ui/Sheet.tsx): slides up from the bottom edge. */
+@keyframes sheet-up {
+  from {
+    transform: translateY(100%);
+  }
+}
+.sheet-panel {
+  animation: sheet-up 0.28s cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+
+/* Small-screen week overview (components/WeekOverview.tsx): the new week
+   slides in from the side you swiped/stepped toward. */
+@keyframes week-slide-next {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+@keyframes week-slide-prev {
+  from {
+    opacity: 0;
+    transform: translateX(-24px);
+  }
+}
+.week-slide-next {
+  animation: week-slide-next 0.22s ease-out;
+}
+.week-slide-prev {
+  animation: week-slide-prev 0.22s ease-out;
+}
+
 @media (prefers-reduced-motion: reduce) {
+  .week-slide-next,
+  .week-slide-prev,
+  .sheet-panel,
   .starfield-fade,
   .starfield-drift,
   .starfield-twinkle,
@@ -150,4 +199,19 @@ body {
   background-image: radial-gradient(circle at 15% 0%, rgba(216, 80, 63, 0.16), transparent 55%),
     radial-gradient(circle at 85% 100%, rgba(226, 168, 87, 0.1), transparent 55%);
   background-attachment: fixed;
+  /* Keep content clear of the iPhone notch / home bar when installed to the
+     home screen (see viewport-fit=cover in index.html). 0 everywhere else. */
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
+    env(safe-area-inset-left);
+}
+
+/* iOS Safari zooms the whole page in when you tap a text box whose text is
+   under 16px. Bumping form fields to 16px on touch screens stops that. (Plain
+   CSS outside Tailwind's layers, so it wins over text-sm etc.) */
+@media (pointer: coarse) {
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
 }

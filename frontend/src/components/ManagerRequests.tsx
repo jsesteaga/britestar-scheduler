@@ -1,7 +1,8 @@
 import type { CoverageRequest, Shift, SwapRequest, TimeOffRequest, Worker } from "../types";
-import { formatCompactTime } from "../utils/time";
-import { formatFriendlyDate } from "../utils/week";
-import { CardButton, RequestCard } from "./RequestCard";
+import { describeShift } from "../utils/time";
+import { formatFriendlyDate, swapFocus, toISODate } from "../utils/week";
+import { CardButton, OfferChip, RequestCard, type OpenTarget } from "./RequestCard";
+import { SwapCard } from "./SwapCard";
 import { Avatar } from "./ui/Avatar";
 import { CardStack, type StackItem } from "./ui/CardStack";
 
@@ -18,9 +19,10 @@ type ManagerRequestsProps = {
   onAssignCover: (request: CoverageRequest, workerId: string) => void;
   onApproveSwap: (request: SwapRequest) => void;
   onDenySwap: (id: string) => void;
+  // Clicking a card jumps to its week and highlights its day(s).
+  onOpen: (target: OpenTarget) => void;
+  selectedKey?: string | null;
 };
-
-const shiftTime = (s: Shift) => `${formatCompactTime(s.start)}–${formatCompactTime(s.end)}`;
 
 /** Every pending request as one date-sorted stack: soonest on top. */
 export function ManagerRequests(props: ManagerRequestsProps) {
@@ -28,9 +30,12 @@ export function ManagerRequests(props: ManagerRequestsProps) {
   const byId = (id: string) => workers.find((w) => w.id === id);
   const cards: (StackItem & { date: string })[] = [];
 
+  // Only time off that hasn't fully passed yet — an old request for last
+  // month is just clutter.
+  const today = toISODate(new Date());
   for (const r of props.timeOff) {
     const worker = byId(r.workerId);
-    if (r.status !== "pending" || !worker) continue;
+    if (r.status !== "pending" || !worker || r.endDate < today) continue;
     cards.push({
       key: `pto-${r.id}`,
       date: r.startDate,
@@ -38,6 +43,8 @@ export function ManagerRequests(props: ManagerRequestsProps) {
         <RequestCard
           kind="timeoff"
           date={r.startDate}
+          onOpen={() => props.onOpen({ key: `pto-${r.id}`, date: r.startDate, endDate: r.endDate })}
+          selected={props.selectedKey === `pto-${r.id}`}
           title={
             <>
               <Avatar name={worker.name} color={worker.avatarColor} size="sm" />
@@ -81,6 +88,8 @@ export function ManagerRequests(props: ManagerRequestsProps) {
         <RequestCard
           kind="coverage"
           date={shift.date}
+          onOpen={() => props.onOpen({ key: `cov-${r.id}`, date: shift.date, shiftIds: [shift.id] })}
+          selected={props.selectedKey === `cov-${r.id}`}
           title={
             <>
               <Avatar name={worker.name} color={worker.avatarColor} size="sm" />
@@ -89,7 +98,7 @@ export function ManagerRequests(props: ManagerRequestsProps) {
               </span>
             </>
           }
-          subtitle={[`${formatFriendlyDate(shift.date)}, ${shiftTime(shift)}`, r.note && `“${r.note}”`]
+          subtitle={[describeShift(shift), r.note && `“${r.note}”`]
             .filter(Boolean)
             .join(" · ")}
           actions={
@@ -109,21 +118,21 @@ export function ManagerRequests(props: ManagerRequestsProps) {
                 </span>
               )}
               {offers.map((w) => (
-                <span
+                <OfferChip
                   key={w.id}
-                  className="flex items-center gap-1.5 rounded-full border border-brite-green/30 bg-brite-green/10 py-0.5 pl-0.5 pr-1"
-                >
-                  <Avatar name={w.name} color={w.avatarColor} size="sm" />
-                  <span className="text-xs text-brite-white">{w.name} can cover</span>
-                  <button
-                    type="button"
-                    onClick={() => props.onAssignCover(r, w.id)}
-                    title={`Give this shift to ${w.name} (takes ${worker.name} off it)`}
-                    className="rounded-full bg-brite-green px-2.5 py-0.5 text-[11px] font-semibold text-brite-white hover:brightness-110"
-                  >
-                    Assign
-                  </button>
-                </span>
+                  worker={w}
+                  label={`${w.name} can cover`}
+                  action={
+                    <button
+                      type="button"
+                      onClick={() => props.onAssignCover(r, w.id)}
+                      title={`Give this shift to ${w.name} (takes ${worker.name} off it)`}
+                      className="rounded-full bg-brite-green px-2.5 py-0.5 text-[11px] font-semibold text-brite-white hover:brightness-110"
+                    >
+                      Assign
+                    </button>
+                  }
+                />
               ))}
               {cant.length > 0 && (
                 <span className="text-xs text-brite-tan/40">Can't: {cant.join(", ")}</span>
@@ -142,19 +151,22 @@ export function ManagerRequests(props: ManagerRequestsProps) {
     const theirs = shifts.find((s) => s.id === r.targetShiftId);
     if (!requester || !target || !mine || !theirs) continue;
     const date = mine.date < theirs.date ? mine.date : theirs.date;
+    // Once either shift has passed, the swap can't happen — hide it.
+    if (date < today) continue;
     cards.push({
       key: `swap-${r.id}`,
       date,
       node: (
-        <RequestCard
-          kind="swap"
-          date={date}
-          title={
-            <span>
-              <b className="font-semibold">{requester.name}</b> ⇄ <b className="font-semibold">{target.name}</b>
-            </span>
-          }
-          subtitle={`${formatFriendlyDate(mine.date)}, ${shiftTime(mine)}  ⇄  ${formatFriendlyDate(theirs.date)}, ${shiftTime(theirs)}`}
+        <SwapCard
+          requester={requester}
+          target={target}
+          requesterShift={mine}
+          targetShift={theirs}
+          onOpen={() => {
+            const focus = swapFocus(mine, theirs);
+            props.onOpen({ key: `swap-${r.id}`, date: focus.date, shiftIds: focus.shiftIds });
+          }}
+          selected={props.selectedKey === `swap-${r.id}`}
           actions={
             <>
               <CardButton variant="primary" onClick={() => props.onApproveSwap(r)}>

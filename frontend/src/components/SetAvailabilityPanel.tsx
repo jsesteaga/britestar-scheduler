@@ -1,12 +1,14 @@
 import { useState } from "react";
 import type { Day, DayAvailability, TimeOffRequest } from "../types";
-import { formatFriendlyDate } from "../utils/week";
+import { formatFriendlyDate, toISODate } from "../utils/week";
 import { AvailabilityForm } from "./AvailabilityForm";
 import { RequestTimeOffForm } from "./RequestTimeOffForm";
 
 type Tab = "general" | "days-off";
 
 type SetAvailabilityPanelProps = {
+  // Which tab to open on ("Request time off" opens straight to days-off).
+  startTab?: Tab;
   initialDays?: Record<Day, DayAvailability>;
   myTimeOff: TimeOffRequest[];
   onSubmitAvailability: (days: Record<Day, DayAvailability>) => void;
@@ -21,6 +23,7 @@ type SetAvailabilityPanelProps = {
  * requests to approve.
  */
 export function SetAvailabilityPanel({
+  startTab = "general",
   initialDays,
   myTimeOff,
   onSubmitAvailability,
@@ -28,8 +31,12 @@ export function SetAvailabilityPanel({
   onCancelTimeOff,
   onClose,
 }: SetAvailabilityPanelProps) {
-  const [tab, setTab] = useState<Tab>("general");
-  const sortedTimeOff = [...myTimeOff].sort((a, b) => a.startDate.localeCompare(b.startDate));
+  const [tab, setTab] = useState<Tab>(startTab);
+  // Upcoming only — requests whose last day has passed drop off the list.
+  const today = toISODate(new Date());
+  const sortedTimeOff = myTimeOff
+    .filter((r) => r.endDate >= today)
+    .sort((a, b) => a.startDate.localeCompare(b.startDate));
 
   const tabClass = (t: Tab) =>
     `rounded-md px-3 py-1.5 text-xs font-semibold transition-colors ${

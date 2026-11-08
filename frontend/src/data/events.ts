@@ -1,4 +1,5 @@
 import type { Day } from "../types";
+import { readJSON, writeJSON } from "./storage";
 
 /**
  * The little promo/event notes shown under each day's date ("Paint Night").
@@ -26,21 +27,11 @@ const DEFAULT_EVENTS: DayEvents = {
 };
 
 export function getDayEvents(): DayEvents {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return JSON.parse(raw) as DayEvents;
-  } catch {
-    // fall through to defaults
-  }
-  return DEFAULT_EVENTS;
+  return readJSON<DayEvents>(STORAGE_KEY) ?? DEFAULT_EVENTS;
 }
 
 export function saveDayEvents(events: DayEvents): void {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(events));
-  } catch {
-    // localStorage unavailable (private browsing, etc.) — changes just won't persist
-  }
+  writeJSON(STORAGE_KEY, events);
 }
 
 /** The note to show for a given day/date: a one-off for that date wins over the weekly one. */

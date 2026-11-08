@@ -34,9 +34,19 @@ function CopyFlyout({ anchorRef, targets, selected, onToggle, onSetAll, onCopy }
     const row = anchor.getBoundingClientRect();
     const { offsetWidth: w, offsetHeight: h } = ref.current;
     // Open to the right of the menu, or flip to the left near the screen edge.
-    const left = row.right + w + 12 > window.innerWidth ? row.left - w - 4 : row.right + 4;
-    const top = Math.max(8, Math.min(row.top - 6, window.innerHeight - h - 8));
-    setPos({ left, top });
+    // On a phone neither side fits — then it drops down over the menu,
+    // just under the row, kept on screen.
+    const fitsRight = row.right + w + 12 <= window.innerWidth;
+    const fitsLeft = row.left - w - 4 >= 8;
+    if (fitsRight || fitsLeft) {
+      const left = fitsRight ? row.right + 4 : row.left - w - 4;
+      const top = Math.max(8, Math.min(row.top - 6, window.innerHeight - h - 8));
+      setPos({ left, top });
+    } else {
+      const left = Math.max(8, Math.min(row.left + 12, window.innerWidth - w - 8));
+      const top = Math.max(8, Math.min(row.bottom + 2, window.innerHeight - h - 8));
+      setPos({ left, top });
+    }
   }, [anchorRef]);
 
   const allSelected = selected.length === targets.length;
@@ -94,7 +104,7 @@ function CopyFlyout({ anchorRef, targets, selected, onToggle, onSetAll, onCopy }
             : `Copy to ${selected.length} day${selected.length === 1 ? "" : "s"}`}
         </button>
         <p className="mt-1.5 text-[10px] leading-snug text-brite-tan/40">
-          Time + bartenders · skips anyone off that day
+          Time + bartenders · skips anyone off that day · joins a similar shift (within an hour) if the day has one
         </p>
       </div>
     </div>
@@ -106,7 +116,6 @@ export type ShiftMenuActions = {
   onRemoveWorker: (shiftId: string, workerId: string) => void;
   onClearWorkers: (shiftId: string) => void;
   onSetTime: (shiftId: string, start: string, end: string) => void;
-  onDuplicate: (shiftId: string) => void;
   onCopyToDates: (shiftId: string, dates: string[]) => void;
   onDeleteShift: (shiftId: string) => void;
 };
@@ -119,6 +128,8 @@ type ShiftContextMenuProps = {
   dayLabel: string;
   assignedWorkers: Worker[];
   addableWorkers: Worker[];
+  offWorkers?: Worker[];
+  onOffWorkerClick?: (workerId: string) => void;
   // Set when the menu was opened by right-clicking a specific bartender's chip.
   focusWorkerId?: string;
   copyTargets: CopyTarget[];
@@ -176,6 +187,8 @@ export function ShiftContextMenu({
   dayLabel,
   assignedWorkers,
   addableWorkers,
+  offWorkers = [],
+  onOffWorkerClick,
   focusWorkerId,
   copyTargets,
   actions,
@@ -256,13 +269,15 @@ export function ShiftContextMenu({
         icon="+"
         label="Add bartender"
         hint={expanded === "add" ? "▾" : "▸"}
-        disabled={addableWorkers.length === 0}
+        disabled={addableWorkers.length + offWorkers.length === 0}
         onClick={() => setExpanded(expanded === "add" ? null : "add")}
       />
       {expanded === "add" && (
         <div className="mx-2 mb-1 rounded-lg bg-brite-black/40 py-1">
           <WorkerPickerList
             workers={addableWorkers}
+            offWorkers={offWorkers}
+            onOffWorkerClick={(id) => run(() => onOffWorkerClick?.(id))}
             onPick={(workerId) => run(() => actions.onAddWorker(shift.id, workerId))}
           />
         </div>
@@ -276,11 +291,6 @@ export function ShiftContextMenu({
       />
 
       <MenuDivider />
-      <MenuItem
-        icon="⧉"
-        label="New shift at same time"
-        onClick={() => run(() => actions.onDuplicate(shift.id))}
-      />
       <div
         ref={copyAnchorRef}
         onMouseEnter={copyTargets.length > 0 ? openCopy : undefined}
@@ -292,8 +302,10 @@ export function ShiftContextMenu({
           label="Copy to other days…"
           hint="▸"
           disabled={copyTargets.length === 0}
-          // Click also toggles it, for touch screens (no hover there).
-          onClick={() => setCopyOpen((v) => !v)}
+          // Click opens it too, for touch screens (no hover there). Open, not
+          // toggle: a tap also fires a pretend mouseenter first, which has
+          // already opened it — toggling would shut it again instantly.
+          onClick={openCopy}
         />
         {copyOpen && (
           <CopyFlyout

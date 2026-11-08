@@ -5,6 +5,12 @@ import { VitePWA } from 'vite-plugin-pwa'
 
 // https://vite.dev/config/
 export default defineConfig({
+  // Always localhost:5173. The app's saved data (localStorage) belongs to the
+  // exact address, so if Vite quietly hopped to 5174 because 5173 was busy,
+  // the app would open with an empty, freshly-seeded copy and look like
+  // everything was lost. strictPort makes a second `npm run dev` fail loudly
+  // instead.
+  server: { port: 5173, strictPort: true },
   plugins: [
     react(),
     tailwindcss(),
@@ -14,8 +20,8 @@ export default defineConfig({
       // a production build — handy for previewing without a full deploy.
       devOptions: { enabled: true },
       manifest: {
-        name: 'BriteStar Scheduler',
-        short_name: 'BriteStar',
+        name: 'Britestar Scheduler',
+        short_name: 'Britestar',
         description: 'Britestar Tavern staff scheduling',
         start_url: '/',
         display: 'standalone',

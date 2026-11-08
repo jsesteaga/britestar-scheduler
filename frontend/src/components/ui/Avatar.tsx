@@ -1,21 +1,11 @@
+import { initialsFor } from "../../utils/initials";
+
 type AvatarProps = {
   name: string;
   color: string;
   imageUrl?: string;
   size?: "sm" | "md";
 };
-
-function initialsFor(name: string): string {
-  // Skip words that don't start with a letter/number, so "Taylor (closer)"
-  // gives "T", not "T(".
-  return name
-    .split(" ")
-    .filter((part) => /^[\p{L}\p{N}]/u.test(part))
-    .map((part) => part[0])
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
-}
 
 export function Avatar({ name, color, imageUrl, size = "md" }: AvatarProps) {
   const sizeClasses = size === "sm" ? "h-7 w-7 text-xs" : "h-10 w-10 text-sm";

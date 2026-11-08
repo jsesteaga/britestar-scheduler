@@ -1,4 +1,5 @@
 import type { Worker } from "../types";
+import { readJSON, writeJSON } from "./storage";
 
 /**
  * The bartender roster. Same DEMO-ONLY approach as `auth/credentials.ts`:
@@ -64,36 +65,22 @@ function uniqueUsername(base: string, existing: Worker[]): string {
 }
 
 export function saveWorkers(workers: Worker[]): void {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(workers));
-  } catch {
-    // localStorage unavailable (private browsing, etc.) — changes just won't persist
-  }
+  writeJSON(STORAGE_KEY, workers);
 }
 
 export function getWorkers(): Worker[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      // A manager-only "view name" used to be stored separately; renaming now
-      // changes the real name everyone sees, so fold any old override in.
-      const stored = (JSON.parse(raw) as (Worker & { managerName?: string })[]).map(
-        ({ managerName, ...w }) => (managerName ? { ...w, name: managerName } : w),
-      );
-      // Merge in any newly-added default names a returning browser doesn't
-      // have yet, without touching existing entries (claimed names, etc.).
-      const missing = DEFAULT_WORKERS.filter(
-        (d) => !stored.some((w) => w.username === d.username),
-      );
-      if (missing.length > 0) {
-        const merged = [...stored, ...missing];
-        saveWorkers(merged);
-        return merged;
-      }
-      return stored;
-    }
-  } catch {
-    // fall through to defaults
+  // A manager-only "view name" used to be stored separately; renaming now
+  // changes the real name everyone sees, so fold any old override in.
+  const stored = readJSON<(Worker & { managerName?: string })[]>(STORAGE_KEY);
+  if (Array.isArray(stored)) {
+    const workers = stored.map(({ managerName, ...w }) => (managerName ? { ...w, name: managerName } : w));
+    // Merge in any newly-added default names a returning browser doesn't
+    // have yet, without touching existing entries (claimed names, etc.).
+    const missing = DEFAULT_WORKERS.filter((d) => !workers.some((w) => w.username === d.username));
+    if (missing.length === 0) return workers;
+    const merged = [...workers, ...missing];
+    saveWorkers(merged);
+    return merged;
   }
   saveWorkers(DEFAULT_WORKERS);
   return DEFAULT_WORKERS;

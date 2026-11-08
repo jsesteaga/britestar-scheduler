@@ -38,7 +38,8 @@ export type NotificationKind =
   | "request"
   | "needs-coverage"
   | "offer"
-  | "response";
+  | "response"
+  | "swap";
 
 export type AppNotification = {
   id: string;
@@ -47,8 +48,9 @@ export type AppNotification = {
   text: string;
   createdAt: string; // ISO timestamp
   read: boolean;
-  // For "response" notes (your own answer to a give-away request): which
-  // request it was, so the bell can offer to change your answer.
+  // The give-away request a note is about ("needs coverage", offers, your
+  // own answers) — lets the bell offer actions, and lets the note be cleared
+  // when that request is cancelled.
   requestId?: string;
 };
 
@@ -104,13 +106,19 @@ export type CoverageResponse = {
 };
 
 // A worker asks to trade one of their shifts for another worker's shift.
-// Approving performs the swap immediately and removes the request.
+// The other worker has to accept first ("awaiting-partner"); only then does
+// it reach the manager ("awaiting-manager"), whose approval performs the swap
+// and removes the request. Saved swaps from before this existed have no
+// status and count as already awaiting the manager.
+export type SwapStatus = "awaiting-partner" | "awaiting-manager";
+
 export type SwapRequest = {
   id: string;
   requestingWorkerId: string;
   requestingShiftId: string;
   targetWorkerId: string;
   targetShiftId: string;
+  status?: SwapStatus;
 };
 
 export type DayAvailability = {

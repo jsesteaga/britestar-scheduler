@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { eventFor, getDayEvents, saveDayEvents, type DayEvents } from "../data/events";
 import {
@@ -13,6 +13,7 @@ import {
   getTimeOff,
   saveAvailability,
   saveCoverageRequests,
+  saveGeneratedWeeks,
   saveNotifications,
   savePostedWeeks,
   saveShifts,
@@ -20,7 +21,10 @@ import {
   saveTimeOff,
 } from "../data/scheduleStore";
 import { addWorker, getWorkers, removeWorker, saveWorkers } from "../data/workers";
-import { describeShift, diffShiftNotifications, type PendingNotification } from "../data/notifications";
+import { diffShiftNotifications, type PendingNotification } from "../data/notifications";
+import { useHoldDrag, type HoldDragItem, type HoldDropTarget } from "../hooks/useHoldDrag";
+import { useMediaQuery } from "../hooks/useMediaQuery";
+import { usePersistedState } from "../hooks/usePersistedState";
 import type {
   AppNotification,
   Availability,
@@ -34,15 +38,12 @@ import type {
   Worker,
 } from "../types";
 import { getShiftDrag, isShiftDrag, type DragPayload } from "../utils/dnd";
-import {
-  displayTimeToInputValue,
-  formatPostedAt,
-  inputValueToDisplayTime,
-} from "../utils/time";
+import { describeShift, formatCompactTime, formatPostedAt, minutesToDisplayTime, nightMinutes } from "../utils/time";
 import {
   DAY_FULL_NAMES,
   DAYS,
   dateToDayName,
+  formatFriendlyDate,
   formatMonthTitle,
   fromISODate,
   formatShortDate,
@@ -56,28 +57,45 @@ import {
 } from "../utils/week";
 import { AvailabilityPanel } from "./AvailabilityPanel";
 import { BritestarLogo } from "./BritestarLogo";
+import { CopyPreviousWeekDialog, type CopyScope } from "./CopyPreviousWeekDialog";
 import { CoverageRequestForm } from "./CoverageRequestForm";
 import { DayEventNote } from "./DayEventNote";
 import { ManageWorkersPanel } from "./ManageWorkersPanel";
 import { CoverageBoard } from "./CoverageBoard";
+import { DayTimeOff } from "./DayTimeOff";
 import { ManagerRequests } from "./ManagerRequests";
 import { MonthView } from "./MonthView";
+import type { OpenTarget } from "./RequestCard";
+import { MyRequests } from "./MyRequests";
 import { NotificationCenter } from "./NotificationCenter";
-import { ManagerPostBar, ScheduleInTheWorks, type PostState } from "./PostStatus";
+import { FinalizeButton, ScheduleInTheWorks, type PostState } from "./PostStatus";
 import { SetAvailabilityPanel } from "./SetAvailabilityPanel";
-import { ShiftCard, type BartenderMenu, type CoverageHighlight } from "./ShiftCard";
+import { ShiftQuickMenu, type QuickMenuKind, type ShiftMenuBase } from "./ShiftQuickMenu";
+import {
+  ShiftCard,
+  type BartenderMenu,
+  type ChipBadge,
+  type CoverageHighlight,
+  type PillAction,
+  type PillMenu,
+} from "./ShiftCard";
 import type { ShiftMenuActions } from "./ShiftContextMenu";
 import { StarField } from "./StarField";
+import { SwapApproveDialog } from "./SwapApproveDialog";
 import { SwapRequestForm } from "./SwapRequestForm";
-import { TimeOffCard } from "./TimeOffCard";
+import { TimeOffDialog } from "./TimeOffDialog";
 import { Avatar } from "./ui/Avatar";
+import { InstallAppLink } from "./InstallAppPrompt";
+import { HoldDragGhost } from "./HoldDragGhost";
+import { WeekOverview } from "./WeekOverview";
+import { Sheet } from "./ui/Sheet";
 import { WorkerPickerList } from "./WorkerPickerList";
-import { Button } from "./ui/Button";
+import { Button, ShortLabel } from "./ui/Button";
 import { Modal } from "./ui/Modal";
 import { MenuDivider, MenuItem, MenuLabel, Popover } from "./ui/Popover";
 
 type ViewMode = "week" | "month";
-type RequestTab = "coverage" | "swap" | "availability" | null;
+type RequestTab = "coverage" | "swap" | "availability" | "timeoff" | null;
 
 type Snapshot = {
   shifts: Shift[];
@@ -87,8 +105,9 @@ type Snapshot = {
   swapRequests: SwapRequest[];
   availability: Availability[];
   dayEvents: DayEvents;
-  postedWeeks: Record<string, PostedWeek>;
   notifications: AppNotification[];
+  // postedWeeks is deliberately NOT here: a finalized week only goes back to
+  // work-in-progress through "Back to work in progress", never via Undo.
 };
 
 // When the bar closes, and the rules for auto-timing a newly added shift
@@ -97,14 +116,9 @@ const CLOSING_TIME = "2:00 AM";
 const NIGHT_SHIFT_FROM = 19 * 60; // starting 7 PM or later: runs to close
 const MID_SHIFT_END = 21 * 60; // otherwise ends by 9 PM, when the night crew starts…
 const NEW_SHIFT_LENGTH = 4 * 60; // …and is at most 4 hours
-
-/** Minutes since midnight (may exceed 24h for after-midnight times) → "9:00 PM". */
-function minutesToDisplayTime(minutes: number): string {
-  const m = ((minutes % 1440) + 1440) % 1440;
-  const hh = String(Math.floor(m / 60)).padStart(2, "0");
-  const mm = String(m % 60).padStart(2, "0");
-  return inputValueToDisplayTime(`${hh}:${mm}`);
-}
+// "Copy to other days" joins an existing shift whose start and end are each
+// within this much of the copied one, instead of adding a near-duplicate.
+const SIMILAR_SHIFT_MINUTES = 60;
 
 /**
  * How many shifts differ between the posted snapshot and the live week:
@@ -126,35 +140,26 @@ export function SchedulePage() {
   const [searchParams] = useSearchParams();
   const isAdmin = searchParams.get("role") === "admin";
 
-  const [workers, setWorkersRaw] = useState<Worker[]>(() => getWorkers());
-  const [shifts, setShiftsRaw] = useState<Shift[]>(() => getShifts());
-  const [timeOff, setTimeOffRaw] = useState<TimeOffRequest[]>(() => getTimeOff());
-  const [coverageRequests, setCoverageRequestsRaw] = useState<CoverageRequest[]>(() =>
-    getCoverageRequests(),
-  );
-  const [swapRequests, setSwapRequestsRaw] = useState<SwapRequest[]>(() => getSwapRequests());
-  const [availability, setAvailabilityRaw] = useState<Availability[]>(() => getAvailability());
+  // Each of these saves itself on every change (see usePersistedState).
+  const [workers, setWorkers] = usePersistedState(getWorkers, saveWorkers);
+  // shifts saves through setShifts below, which also sends notifications.
+  const [shifts, , setShiftsRaw] = usePersistedState(getShifts, saveShifts);
+  const [timeOff, setTimeOff] = usePersistedState(getTimeOff, saveTimeOff);
+  const [coverageRequests, setCoverageRequests] = usePersistedState(getCoverageRequests, saveCoverageRequests);
+  const [swapRequests, setSwapRequests] = usePersistedState(getSwapRequests, saveSwapRequests);
+  const [availability, setAvailability] = usePersistedState(getAvailability, saveAvailability);
+  const [dayEvents, setDayEvents] = usePersistedState(getDayEvents, saveDayEvents);
+  const [postedWeeks, setPostedWeeks] = usePersistedState(getPostedWeeks, savePostedWeeks);
+  const [notifications, setNotifications] = usePersistedState(getNotifications, saveNotifications);
   // getShifts() above may seed this on a fresh browser/migration — read it
   // after, so that seeded value is picked up rather than a stale empty [].
-  const [generatedWeeks, setGeneratedWeeks] = useState<string[]>(() => getGeneratedWeeks());
+  // (ensureWeeksGenerated saves it itself, hence the non-saving setter.)
+  const [generatedWeeks, , setGeneratedWeeks] = usePersistedState(getGeneratedWeeks, saveGeneratedWeeks);
   const [history, setHistory] = useState<Snapshot[]>([]);
   const [resolveConfirm, setResolveConfirm] = useState<CoverageRequest | null>(null);
   // Opened from a shift's "Exchange bartender" menu item: start with the list open.
   const [resolveStartPicking, setResolveStartPicking] = useState(false);
   const [dismissConfirm, setDismissConfirm] = useState<CoverageRequest | null>(null);
-  const [dayEvents, setDayEventsRaw] = useState<DayEvents>(() => getDayEvents());
-
-  const [postedWeeks, setPostedWeeksRaw] = useState<Record<string, PostedWeek>>(() => getPostedWeeks());
-  const [notifications, setNotificationsRaw] = useState<AppNotification[]>(() => getNotifications());
-
-  function setNotifications(next: AppNotification[] | ((current: AppNotification[]) => AppNotification[])) {
-    setNotificationsRaw((current) => {
-      const resolved =
-        typeof next === "function" ? (next as (c: AppNotification[]) => AppNotification[])(current) : next;
-      saveNotifications(resolved);
-      return resolved;
-    });
-  }
 
   function notify(pending: PendingNotification[]) {
     if (pending.length === 0) return;
@@ -168,26 +173,6 @@ export function SchedulePage() {
     setNotifications((current) => [...fresh, ...current].slice(0, 200));
   }
 
-  function setPostedWeeks(next: Record<string, PostedWeek>) {
-    savePostedWeeks(next);
-    setPostedWeeksRaw(next);
-  }
-
-  function setDayEvents(next: DayEvents) {
-    saveDayEvents(next);
-    setDayEventsRaw(next);
-  }
-
-  // Every update to these four pieces of state also persists to localStorage
-  // (see data/scheduleStore.ts) — otherwise logging out and back in would
-  // reset the whole schedule, since that unmounts this component.
-  function setWorkers(next: Worker[] | ((current: Worker[]) => Worker[])) {
-    setWorkersRaw((current) => {
-      const resolved = typeof next === "function" ? (next as (c: Worker[]) => Worker[])(current) : next;
-      saveWorkers(resolved);
-      return resolved;
-    });
-  }
   // Every manager edit to shifts goes through here. Besides saving, it diffs
   // the old schedule against the new one to notify affected bartenders (on
   // finalized weeks only) and to close give-away requests that just got
@@ -209,43 +194,10 @@ export function SchedulePage() {
     notify(pending);
     if (resolvedRequestIds.length > 0) {
       setCoverageRequests((current) => current.filter((r) => !resolvedRequestIds.includes(r.id)));
+      // Covered: the "can you take it?" notes are moot, but the history of
+      // what happened (covered / covering / your answers) stays.
+      dropRequestNotes(resolvedRequestIds, ["needs-coverage"]);
     }
-  }
-  function setTimeOff(next: TimeOffRequest[] | ((current: TimeOffRequest[]) => TimeOffRequest[])) {
-    setTimeOffRaw((current) => {
-      const resolved =
-        typeof next === "function" ? (next as (c: TimeOffRequest[]) => TimeOffRequest[])(current) : next;
-      saveTimeOff(resolved);
-      return resolved;
-    });
-  }
-  function setCoverageRequests(
-    next: CoverageRequest[] | ((current: CoverageRequest[]) => CoverageRequest[]),
-  ) {
-    setCoverageRequestsRaw((current) => {
-      const resolved =
-        typeof next === "function"
-          ? (next as (c: CoverageRequest[]) => CoverageRequest[])(current)
-          : next;
-      saveCoverageRequests(resolved);
-      return resolved;
-    });
-  }
-  function setSwapRequests(next: SwapRequest[] | ((current: SwapRequest[]) => SwapRequest[])) {
-    setSwapRequestsRaw((current) => {
-      const resolved =
-        typeof next === "function" ? (next as (c: SwapRequest[]) => SwapRequest[])(current) : next;
-      saveSwapRequests(resolved);
-      return resolved;
-    });
-  }
-  function setAvailability(next: Availability[] | ((current: Availability[]) => Availability[])) {
-    setAvailabilityRaw((current) => {
-      const resolved =
-        typeof next === "function" ? (next as (c: Availability[]) => Availability[])(current) : next;
-      saveAvailability(resolved);
-      return resolved;
-    });
   }
 
   const loggedInUsername = searchParams.get("worker");
@@ -258,6 +210,22 @@ export function SchedulePage() {
   const [viewMode, setViewMode] = useState<ViewMode>("week");
   const [weekOffset, setWeekOffset] = useState(0);
   const [monthOffset, setMonthOffset] = useState(0);
+  // Tablet width and up: seven full day columns (their cards tighten up as
+  // the columns narrow). Phones: no room for that, so the week shows as a
+  // compact overview (WeekOverview) and a day's full editor opens in a sheet.
+  // sheetDay is the day that sheet is showing (null = closed).
+  const isWide = useMediaQuery("(min-width: 768px)");
+  const [sheetDay, setSheetDay] = useState<Day | null>(null);
+  // Press-and-hold dragging of names, for touch screens at every size.
+  const holdDrag = useHoldDrag((item, target) => handleHoldDrop(item, target));
+  // A menu opened from a name/time/"+" tap in the phone week grid.
+  const [quickMenu, setQuickMenu] = useState<{
+    shiftId: string;
+    kind: QuickMenuKind;
+    x: number;
+    y: number;
+    workerId?: string;
+  } | null>(null);
   const [dayMenu, setDayMenu] = useState<{ x: number; y: number; date: string; label: string } | null>(
     null,
   );
@@ -307,7 +275,6 @@ export function SchedulePage() {
         swapRequests,
         availability,
         dayEvents,
-        postedWeeks,
         notifications,
       },
     ]);
@@ -329,7 +296,6 @@ export function SchedulePage() {
       setSwapRequests(last.swapRequests);
       setAvailability(last.availability);
       setDayEvents(last.dayEvents);
-      setPostedWeeks(last.postedWeeks);
       return h.slice(0, -1);
     });
   }
@@ -375,6 +341,7 @@ export function SchedulePage() {
   }
 
   function handleAddWorkerToShift(shiftId: string, workerId: string) {
+    if (blockIfOff(workerId, shiftId)) return;
     pushHistory();
     setShifts((current) =>
       current.map((shift) =>
@@ -415,40 +382,57 @@ export function SchedulePage() {
     setShifts((current) => current.filter((shift) => shift.id !== shiftId));
   }
 
-  // Same time slot, nobody on it — duplicating the bartenders too would put
-  // the same person behind the bar twice at once.
-  function handleDuplicateShift(shiftId: string) {
-    pushHistory();
-    setShifts((current) => {
-      const source = current.find((s) => s.id === shiftId);
-      if (!source) return current;
-      return [...current, { ...source, id: `s${Date.now()}`, workerIds: [] }];
-    });
-  }
-
   function workersOffOn(date: string): string[] {
     return timeOff
       .filter((r) => r.status === "approved" && date >= r.startDate && date <= r.endDate)
       .map((r) => r.workerId);
   }
 
+  // "Copy to other days": each day gets the shift's bartenders (minus anyone
+  // off that day). If the day already has a similar shift — start and end
+  // each within an hour, e.g. 9–2 for 8:30–2 — they join that one instead of
+  // a near-duplicate block being added; days stay at their 2–3 shifts.
   function handleCopyShiftToDates(shiftId: string, dates: string[]) {
-    pushHistory();
-    setShifts((current) => {
-      const source = current.find((s) => s.id === shiftId);
-      if (!source) return current;
-      const copies = dates.map((date, i) => {
-        const off = workersOffOn(date);
-        return {
-          id: `s${Date.now()}-${i}`,
-          date,
-          start: source.start,
-          end: source.end,
-          workerIds: source.workerIds.filter((id) => !off.includes(id)),
-        };
-      });
-      return [...current, ...copies];
+    const source = shifts.find((s) => s.id === shiftId);
+    if (!source) return;
+    const gap = (a: string, b: string) => Math.abs(nightMinutes(a) - nightMinutes(b));
+    const similarOn = (date: string) =>
+      shifts
+        .filter(
+          (s) =>
+            s.date === date &&
+            s.id !== source.id &&
+            gap(s.start, source.start) <= SIMILAR_SHIFT_MINUTES &&
+            gap(s.end, source.end) <= SIMILAR_SHIFT_MINUTES,
+        )
+        .sort((a, b) => gap(a.start, source.start) + gap(a.end, source.end) - (gap(b.start, source.start) + gap(b.end, source.end)))[0];
+
+    const joined = new Map<string, string[]>(); // existing shift id -> people to add
+    const copies: Shift[] = [];
+    dates.forEach((date, i) => {
+      const off = workersOffOn(date);
+      const people = source.workerIds.filter((id) => !off.includes(id));
+      const match = similarOn(date);
+      if (match) joined.set(match.id, people.filter((id) => !match.workerIds.includes(id)));
+      else copies.push({ id: `s${Date.now()}-${i}`, date, start: source.start, end: source.end, workerIds: people });
     });
+
+    pushHistory();
+    setShifts([
+      ...shifts.map((s) => (joined.has(s.id) ? { ...s, workerIds: [...s.workerIds, ...joined.get(s.id)!] } : s)),
+      ...copies,
+    ]);
+    const dayNames = (ds: string[]) => ds.map((d) => dateToDayName(fromISODate(d))).join(", ");
+    const joinedDays = shifts.filter((s) => joined.has(s.id)).map((s) => s.date);
+    showToast(
+      [
+        joinedDays.length ? `Added to the similar shift on ${dayNames(joinedDays)}` : "",
+        copies.length ? `New ${formatCompactTime(source.start)}–${formatCompactTime(source.end)} on ${dayNames(copies.map((c) => c.date))}` : "",
+      ]
+        .filter(Boolean)
+        .join(" · "),
+      { undo: true },
+    );
   }
 
   // A day's shifts display in the order they sit in the `shifts` array, so
@@ -471,7 +455,7 @@ export function SchedulePage() {
       const pos = day.indexOf(moved);
       const before = day[pos - 1];
       const after = day[pos + 1];
-      if (before && after && sortMinutes(after.start) > sortMinutes(before.end)) {
+      if (before && after && nightMinutes(after.start) > nightMinutes(before.end)) {
         moved.start = before.end;
         moved.end = after.start;
       }
@@ -495,20 +479,12 @@ export function SchedulePage() {
     });
   }
 
-  // Early-morning starts (before 5 AM) sort after late-night ones, so a
-  // 2 AM shift lands after the 8:30 PM one instead of first thing.
-  function sortMinutes(display: string): number {
-    const [h, m] = displayTimeToInputValue(display).split(":").map(Number);
-    const minutes = h * 60 + m;
-    return minutes < 5 * 60 ? minutes + 24 * 60 : minutes;
-  }
-
   function handleSortDay(date: string) {
     pushHistory();
     setShifts((current) => {
       const sorted = current
         .filter((s) => s.date === date)
-        .sort((a, b) => sortMinutes(a.start) - sortMinutes(b.start) || sortMinutes(a.end) - sortMinutes(b.end));
+        .sort((a, b) => nightMinutes(a.start) - nightMinutes(b.start) || nightMinutes(a.end) - nightMinutes(b.end));
       // Drop the sorted shifts back into the same array slots that day
       // already occupied, leaving every other day untouched.
       let next = 0;
@@ -544,6 +520,83 @@ export function SchedulePage() {
     setShifts((current) => current.filter((shift) => shift.date !== date));
   }
 
+  // ---- Copy from previous week (day menu) ------------------------------
+  const [copyPrevFor, setCopyPrevFor] = useState<string | null>(null);
+
+  /** The same weekday one week earlier. */
+  function weekBefore(isoDate: string): string {
+    const d = fromISODate(isoDate);
+    d.setDate(d.getDate() - 7);
+    return toISODate(d);
+  }
+
+  // The week before the one showing may never have been opened, so it may
+  // have no shifts yet — fill it in from the template first (as opening it
+  // would), so there's something to copy.
+  function openCopyFromPreviousWeek(date: string) {
+    const result = ensureWeeksGenerated([getMondayOfWeek(weekOffset - 1)], shifts, generatedWeeks);
+    if (result) {
+      setShiftsRaw(result.shifts);
+      setGeneratedWeeks(result.generatedWeeks);
+    }
+    setCopyPrevFor(date);
+  }
+
+  // What each choice in the dialog would do: the dates it replaces, and the
+  // give-away/swap requests on those shifts (which go with them).
+  function copyPlan(scope: CopyScope, date: string) {
+    const targets = scope === "week" ? DAYS.map((d) => toISODate(weekDates[d])) : [date];
+    const replaced = new Set(shifts.filter((s) => targets.includes(s.date)).map((s) => s.id));
+    const pendingRequests =
+      coverageRequests.filter((r) => replaced.has(r.shiftId)).length +
+      swapRequests.filter((r) => replaced.has(r.requestingShiftId) || replaced.has(r.targetShiftId)).length;
+    const sources = targets.map(weekBefore);
+    return {
+      targets,
+      replaced,
+      shiftCount: shifts.filter((s) => sources.includes(s.date)).length,
+      pendingRequests,
+    };
+  }
+
+  // The day (or whole week) a week earlier replaces what's there now: same
+  // times, same bartenders — minus anyone with approved time off on the new
+  // date, or who's no longer on the roster. Undoable.
+  function handleCopyFromPreviousWeek(scope: CopyScope, date: string) {
+    const { targets, replaced } = copyPlan(scope, date);
+    const onRoster = new Set(workers.map((w) => w.id));
+    const leftOff = new Set<string>();
+    const stamp = Date.now();
+    const copies = targets.flatMap((target, t) => {
+      const off = workersOffOn(target);
+      return shifts
+        .filter((s) => s.date === weekBefore(target))
+        .map((s, i) => {
+          s.workerIds.filter((id) => off.includes(id)).forEach((id) => leftOff.add(id));
+          return {
+            id: `s${stamp}-${t}-${i}`,
+            date: target,
+            start: s.start,
+            end: s.end,
+            workerIds: s.workerIds.filter((id) => onRoster.has(id) && !off.includes(id)),
+          };
+        });
+    });
+    pushHistory();
+    setShifts([...shifts.filter((s) => !replaced.has(s.id)), ...copies]);
+    setCoverageRequests((current) => current.filter((r) => !replaced.has(r.shiftId)));
+    setSwapRequests((current) =>
+      current.filter((r) => !replaced.has(r.requestingShiftId) && !replaced.has(r.targetShiftId)),
+    );
+    const names = [...leftOff].map((id) => workers.find((w) => w.id === id)?.name ?? "someone");
+    showToast(
+      `Copied ${scope === "week" ? "last week" : `last ${DAY_FULL_NAMES[dateToDayName(fromISODate(date))]}`} · ${
+        copies.length
+      } shift${copies.length === 1 ? "" : "s"}${names.length ? ` · left off (time off): ${names.join(", ")}` : ""}`,
+      { undo: true },
+    );
+  }
+
   // A new shift picks up where the day's latest shift ends. From 7 PM on it
   // runs to close (1–8:30 → 8:30–2); earlier it's a mid shift ending at 9 PM,
   // at most 4 hours long (1–5 → 5–9, 1–6 → 6–9, 12–3 → 3–7).
@@ -553,9 +606,9 @@ export function SchedulePage() {
     const dayShifts = current.filter((s) => s.date === date);
     if (dayShifts.length === 0) return { start: "12:00 PM", end: "5:00 PM" };
 
-    const latest = dayShifts.reduce((a, b) => (sortMinutes(b.end) > sortMinutes(a.end) ? b : a));
-    const start = sortMinutes(latest.end);
-    const close = sortMinutes(CLOSING_TIME);
+    const latest = dayShifts.reduce((a, b) => (nightMinutes(b.end) > nightMinutes(a.end) ? b : a));
+    const start = nightMinutes(latest.end);
+    const close = nightMinutes(CLOSING_TIME);
     if (start >= close) return { start: latest.start, end: latest.end };
 
     const end =
@@ -571,7 +624,9 @@ export function SchedulePage() {
     ]);
   }
 
-  function handleDropOnShift(payload: DragPayload, targetShiftId: string) {
+  // Both drop handlers return whether anything changed (false = blocked).
+  function handleDropOnShift(payload: DragPayload, targetShiftId: string): boolean {
+    if (blockIfOff(payload.workerId, targetShiftId)) return false;
     pushHistory();
     setShifts((current) => {
       let updated = current;
@@ -589,33 +644,78 @@ export function SchedulePage() {
       );
       return updated;
     });
+    return true;
   }
 
-  function handleDropOnWorker(payload: DragPayload, targetShiftId: string, targetWorkerId: string) {
-    if (payload.workerId === targetWorkerId) return;
-    if (payload.source !== "shift") {
-      handleDropOnShift(payload, targetShiftId);
-      return;
-    }
+  function handleDropOnWorker(payload: DragPayload, targetShiftId: string, targetWorkerId: string): boolean {
+    if (payload.workerId === targetWorkerId) return false;
+    if (payload.source !== "shift") return handleDropOnShift(payload, targetShiftId);
+    // A swap moves both people — neither can land on a day they're off.
+    if (blockIfOff(payload.workerId, targetShiftId) || blockIfOff(targetWorkerId, payload.shiftId)) return false;
     pushHistory();
     const sourceShiftId = payload.shiftId;
+    // Only add someone who isn't already there — if the person dropped onto
+    // was also on the source shift, they'd otherwise end up listed twice.
+    const swapIn = (ids: string[], out: string, inn: string) => {
+      const kept = ids.filter((id) => id !== out);
+      return kept.includes(inn) ? kept : kept.concat(inn);
+    };
     setShifts((current) =>
       current.map((s) => {
         if (s.id === sourceShiftId && s.id === targetShiftId) return s;
-        if (s.id === sourceShiftId) {
-          return {
-            ...s,
-            workerIds: s.workerIds.filter((id) => id !== payload.workerId).concat(targetWorkerId),
-          };
-        }
-        if (s.id === targetShiftId) {
-          return {
-            ...s,
-            workerIds: s.workerIds.filter((id) => id !== targetWorkerId).concat(payload.workerId),
-          };
-        }
+        if (s.id === sourceShiftId) return { ...s, workerIds: swapIn(s.workerIds, payload.workerId, targetWorkerId) };
+        if (s.id === targetShiftId) return { ...s, workerIds: swapIn(s.workerIds, targetWorkerId, payload.workerId) };
         return s;
       }),
+    );
+    return true;
+  }
+
+  // Every press-and-hold drop (touch screens at any size, and the phone grid
+  // with a mouse too) — the same things a mouse drag does on a computer.
+  function handleHoldDrop(item: HoldDragItem, target: HoldDropTarget) {
+    if (item.kind === "shift") {
+      if (target.shiftId) {
+        if (target.shiftId !== item.shiftId) handleMoveShiftNextTo(item.shiftId, target.shiftId, target.side);
+      } else if (target.date) {
+        handleMoveShiftToDay(item.shiftId, target.date);
+      }
+      return;
+    }
+    if (target.rosterId) {
+      // Reordering the Manage bartenders roster (only names from the roster).
+      if (!item.fromShiftId && target.rosterId !== item.workerId) {
+        handleReorderWorker(item.workerId, target.rosterId, target.side);
+      }
+      return;
+    }
+    if (!target.shiftId || target.shiftId === item.fromShiftId || target.workerId === item.workerId) return;
+    handleMovePerson(item.workerId, item.fromShiftId, target.shiftId, target.workerId);
+  }
+
+  // A name dropped onto a shift: from the roster it's added; from another
+  // shift it moves there (or swaps, if dropped onto someone). Says what
+  // happened, with Undo right there.
+  function handleMovePerson(workerId: string, fromShiftId: string | undefined, toShiftId: string, toWorkerId?: string) {
+    const target = shifts.find((s) => s.id === toShiftId);
+    if (!target) return;
+    const nameOf = (id: string) => workers.find((w) => w.id === id)?.name ?? "Someone";
+    // From the roster, dropping onto someone just adds (same as a mouse drag).
+    const swapWith = fromShiftId ? toWorkerId : undefined;
+    if (!swapWith && target.workerIds.includes(workerId)) {
+      showToast(`${nameOf(workerId)} is already on that shift`);
+      return;
+    }
+    const payload: DragPayload = fromShiftId
+      ? { source: "shift", workerId, shiftId: fromShiftId }
+      : { source: "roster", workerId };
+    const done = swapWith ? handleDropOnWorker(payload, toShiftId, swapWith) : handleDropOnShift(payload, toShiftId);
+    if (!done) return; // blocked — blockIfOff already said why
+    showToast(
+      swapWith
+        ? `Swapped ${nameOf(workerId)} and ${nameOf(swapWith)}`
+        : `${fromShiftId ? "Moved" : "Added"} ${nameOf(workerId)} to ${describeShift(target)}`,
+      { undo: true },
     );
   }
 
@@ -656,17 +756,103 @@ export function SchedulePage() {
     setRequestTab(null);
   }
 
+  // Approved time off means they're off the schedule those days: pull them
+  // off any shifts in the range (today or later) right away.
+  function removeFromShiftsInRange(workerId: string, startDate: string, endDate: string) {
+    const from = startDate < todayISO ? todayISO : startDate;
+    if (!shifts.some((s) => s.date >= from && s.date <= endDate && s.workerIds.includes(workerId))) return;
+    setShifts((current) =>
+      current.map((s) =>
+        s.date >= from && s.date <= endDate && s.workerIds.includes(workerId)
+          ? { ...s, workerIds: s.workerIds.filter((id) => id !== workerId) }
+          : s,
+      ),
+    );
+  }
+
+  function describeRange(startDate: string, endDate: string) {
+    return startDate === endDate
+      ? formatFriendlyDate(startDate)
+      : `${formatFriendlyDate(startDate)} – ${formatFriendlyDate(endDate)}`;
+  }
+
   function handleApproveTimeOff(requestId: string) {
+    const request = timeOff.find((r) => r.id === requestId);
+    if (!request) return;
     pushHistory();
-    // Note: we don't auto-remove the worker from that day's shift here.
-    // Shifts are a recurring weekly template with no date of their own, so
-    // there's no way to pull someone off just the one dated occurrence
-    // without also affecting every other week's copy of that shift. The
-    // approved Time Off card will show alongside their shift that day —
-    // remove them from it by hand (✕) if they shouldn't be on it that week.
     setTimeOff((current) =>
       current.map((r) => (r.id === requestId ? { ...r, status: "approved" } : r)),
     );
+    removeFromShiftsInRange(request.workerId, request.startDate, request.endDate);
+    notify([
+      {
+        workerId: request.workerId,
+        kind: "request",
+        text: `Your time off for ${describeRange(request.startDate, request.endDate)} was approved.`,
+      },
+    ]);
+  }
+
+  // Manager edits the dates on someone's time off (from the Time Off card or
+  // an OFF name in a picker). Still approved → off any shifts in the new range.
+  function handleUpdateTimeOff(requestId: string, startDate: string, endDate: string) {
+    const request = timeOff.find((r) => r.id === requestId);
+    if (!request) return;
+    pushHistory();
+    setTimeOff((current) => current.map((r) => (r.id === requestId ? { ...r, startDate, endDate } : r)));
+    if (request.status === "approved") removeFromShiftsInRange(request.workerId, startDate, endDate);
+    notify([
+      {
+        workerId: request.workerId,
+        kind: "request",
+        text: `Your manager changed your time off to ${describeRange(startDate, endDate)}.`,
+      },
+    ]);
+  }
+
+  // Manager cancels someone's time off — they're schedulable those days again.
+  function handleManagerCancelTimeOff(requestId: string) {
+    const request = timeOff.find((r) => r.id === requestId);
+    if (!request) return;
+    pushHistory();
+    setTimeOff((current) => current.filter((r) => r.id !== requestId));
+    notify([
+      {
+        workerId: request.workerId,
+        kind: "request",
+        text: `Your time off for ${describeRange(request.startDate, request.endDate)} was cancelled by your manager.`,
+      },
+    ]);
+  }
+
+  // Blocked actions (e.g. scheduling someone on their day off) say why here.
+  // `undo` adds an Undo button (and stays up longer, to give time to tap it).
+  const [toast, setToast] = useState<{ message: string; undo?: boolean } | null>(null);
+  const toastTimer = useRef<number | undefined>(undefined);
+  function showToast(message: string, { undo = false } = {}) {
+    setToast({ message, undo });
+    window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(null), undo ? 5000 : 3200);
+  }
+
+  // Someone with approved time off can't be put on a shift that day.
+  function blockIfOff(workerId: string, shiftId: string): boolean {
+    const shift = shifts.find((s) => s.id === shiftId);
+    if (!shift || !workersOffOn(shift.date).includes(workerId)) return false;
+    const name = workers.find((w) => w.id === workerId)?.name ?? "They";
+    showToast(`${name} is off ${formatFriendlyDate(shift.date)}. Change their time off to schedule them.`);
+    return true;
+  }
+
+  const [editingTimeOffId, setEditingTimeOffId] = useState<string | null>(null);
+  // "Approve swap" opens a picture of the swap first (SwapApproveDialog).
+  const [approvingSwap, setApprovingSwap] = useState<SwapRequest | null>(null);
+  // From an OFF name in a picker: open that person's time off covering the date.
+  function openTimeOffFor(workerId: string, date: string) {
+    const request = timeOff.find(
+      (r) => r.workerId === workerId && r.status === "approved" && date >= r.startDate && date <= r.endDate,
+    );
+    if (request) setEditingTimeOffId(request.id);
   }
 
   function handleDenyTimeOff(requestId: string) {
@@ -676,9 +862,10 @@ export function SchedulePage() {
 
   function handleRequestCoverage(shiftId: string, note: string) {
     pushHistory();
+    const requestId = `c${Date.now()}`;
     setCoverageRequests((current) => [
       ...current,
-      { id: `c${Date.now()}`, shiftId, requestingWorkerId: currentWorker.id, note: note || undefined },
+      { id: requestId, shiftId, requestingWorkerId: currentWorker.id, note: note || undefined },
     ]);
     // Everyone who could take it hears about it — not the requester, and not
     // anyone already on that shift.
@@ -690,6 +877,7 @@ export function SchedulePage() {
           .map((w) => ({
             workerId: w.id,
             kind: "needs-coverage" as const,
+            requestId,
             text: `${currentWorker.name} needs coverage: ${describeShift(shift)}. Can you take it?`,
           })),
       );
@@ -735,6 +923,7 @@ export function SchedulePage() {
         {
           workerId: request.requestingWorkerId,
           kind: "offer",
+          requestId,
           text: `${currentWorker.name} offered to cover your shift: ${describeShift(shift)}!`,
         },
       ]);
@@ -766,36 +955,153 @@ export function SchedulePage() {
   // amber + the offer count. Bartenders see amber (green if they offered),
   // and — for shifts today or later — a right-click / press-and-hold menu
   // to answer or change their answer.
+  // Manager view: everything on a shift (today or later) still waiting on a
+  // decision — give-aways, swaps, time-off requests — plus real conflicts
+  // (someone scheduled on a day they have approved off).
+  type Issue = {
+    label: string;
+    workerIds: string[];
+    conflict?: boolean;
+    badge?: ChipBadge;
+    // What the manager can do about it, from the tag's menu on the shift.
+    menuTitle: string;
+    actions: PillAction[];
+  };
+  function issuesFor(shift: Shift): Issue[] {
+    if (shift.date < todayISO) return [];
+    const issues: Issue[] = [];
+    const nameOf = (id: string) => workers.find((w) => w.id === id)?.name ?? "Someone";
+    const req = coverageRequests.find((r) => r.shiftId === shift.id);
+    if (req) {
+      const offers = (req.responses ?? []).filter((a) => a.canCover).length;
+      issues.push({
+        label: offers ? `Needs coverage · ${offers} offer${offers === 1 ? "" : "s"}` : "Needs coverage",
+        workerIds: [req.requestingWorkerId],
+        menuTitle: `${nameOf(req.requestingWorkerId)} needs coverage`,
+        actions: [
+          {
+            label: "Exchange bartender",
+            icon: "⇄",
+            onClick: () => {
+              setResolveStartPicking(true);
+              setResolveConfirm(req);
+            },
+          },
+          { label: "Mark resolved", icon: "✓", onClick: () => handleResolveCoverage(req) },
+          { label: "Dismiss", icon: "✕", onClick: () => setDismissConfirm(req) },
+        ],
+      });
+    }
+    for (const sw of managerSwaps) {
+      const here =
+        sw.requestingShiftId === shift.id ? sw.requestingWorkerId : sw.targetShiftId === shift.id ? sw.targetWorkerId : null;
+      if (!here) continue;
+      issues.push({
+        label: "Swap pending",
+        workerIds: [here],
+        menuTitle: `Swap: ${nameOf(sw.requestingWorkerId)} ⇄ ${nameOf(sw.targetWorkerId)}`,
+        actions: [
+          { label: "Review & approve swap", icon: "⇄", onClick: () => setApprovingSwap(sw) },
+          { label: "Deny swap", icon: "✕", onClick: () => handleDenySwap(sw.id) },
+        ],
+      });
+    }
+    for (const r of timeOff) {
+      if (!shift.workerIds.includes(r.workerId) || shift.date < r.startDate || shift.date > r.endDate) continue;
+      // Name the person right in the label, and tag their chip, so it's
+      // obvious who it's about without hovering.
+      issues.push(
+        r.status === "approved"
+          ? {
+              label: `${nameOf(r.workerId)} is off`,
+              workerIds: [r.workerId],
+              conflict: true,
+              badge: { text: "Off", tone: "red", title: `Approved time off${r.reason ? `: ${r.reason}` : ""}` },
+              menuTitle: `${nameOf(r.workerId)} has the day off${r.reason ? ` · ${r.reason}` : ""}`,
+              actions: [
+                {
+                  label: `Take ${nameOf(r.workerId)} off this shift`,
+                  icon: "−",
+                  onClick: () => handleRemoveWorkerFromShift(shift.id, r.workerId),
+                },
+                { label: "Edit time off", icon: "✎", onClick: () => setEditingTimeOffId(r.id) },
+              ],
+            }
+          : {
+              label: `${nameOf(r.workerId)} asked off`,
+              workerIds: [r.workerId],
+              badge: { text: "Off?", tone: "amber", title: `Time off requested${r.reason ? `: ${r.reason}` : ""}` },
+              menuTitle: `${nameOf(r.workerId)} asked for time off${r.reason ? ` · ${r.reason}` : ""}`,
+              actions: [
+                { label: "Grant time off", icon: "✓", onClick: () => handleApproveTimeOff(r.id) },
+                { label: "Deny", icon: "✕", onClick: () => handleDenyTimeOff(r.id) },
+              ],
+            },
+      );
+    }
+    // Conflicts first — they're the ones that are actually wrong.
+    return issues.sort((a, b) => Number(!!b.conflict) - Number(!!a.conflict));
+  }
+
+  // For month view: how many issues fall on each date. (A function, called
+  // from the JSX, because issuesFor needs todayISO, defined further down.)
+  function attentionByDate(): Record<string, number> {
+    const counts: Record<string, number> = {};
+    for (const s of shifts) {
+      const n = issuesFor(s).length;
+      if (n) counts[s.date] = (counts[s.date] ?? 0) + n;
+    }
+    return counts;
+  }
+
   function coverageFor(shift: Shift): {
     coverage?: CoverageHighlight;
     bartenderMenu?: BartenderMenu;
     onExchange?: () => void;
+    flagWorkerIds?: string[];
+    chipBadges?: Record<string, ChipBadge>;
+    pillMenu?: PillMenu;
   } {
     const req = coverageRequests.find((r) => r.shiftId === shift.id);
-    if (!req) return {};
-    const answers = req.responses ?? [];
     if (isAdmin) {
-      const offers = answers.filter((a) => a.canCover).length;
+      const issues = issuesFor(shift);
+      if (issues.length === 0) return {};
       return {
         coverage: {
-          tone: "amber",
-          label: offers ? `Needs coverage · ${offers} offer${offers === 1 ? "" : "s"}` : "Needs coverage",
+          tone: issues.some((i) => i.conflict) ? "red" : "amber",
+          label: issues.length > 1 ? `${issues[0].label} +${issues.length - 1}` : issues[0].label,
+          title: issues.map((i) => i.label).join("\n"),
         },
+        flagWorkerIds: [...new Set(issues.flatMap((i) => i.workerIds))],
+        pillMenu: { sections: issues.map((i) => ({ title: i.menuTitle, actions: i.actions })) },
+        chipBadges: Object.fromEntries(
+          issues.filter((i) => i.badge).map((i) => [i.workerIds[0], i.badge!] as const),
+        ),
         // Same as Mark resolved → Exchange, opened straight to the list.
-        onExchange: () => {
-          setResolveStartPicking(true);
-          setResolveConfirm(req);
-        },
+        onExchange: req
+          ? () => {
+              setResolveStartPicking(true);
+              setResolveConfirm(req);
+            }
+          : undefined,
       };
     }
+    if (!req) {
+      // Nothing being given away: bartenders still see their own shifts lit
+      // up (finalized or work-in-progress weeks alike).
+      return !isAdmin && shift.workerIds.includes(currentWorker.id)
+        ? { coverage: { tone: "mine", label: "Your shift" } }
+        : {};
+    }
+    const answers = req.responses ?? [];
 
     const mine = req.requestingWorkerId === currentWorker.id;
     const answer = answers.find((a) => a.workerId === currentWorker.id);
     const coverage: CoverageHighlight = mine
       ? { tone: "amber", label: "Giving away" }
       : answer?.canCover
-        ? { tone: "green", label: "You offered" }
-        : { tone: "amber", label: answer ? "Needs coverage · passed" : "Needs coverage" };
+        ? { tone: "green", label: "Offered" }
+        : { tone: "amber", label: answer ? "Passed" : "Needs coverage" };
 
     if (shift.date < todayISO) return { coverage };
     if (mine) {
@@ -815,11 +1121,19 @@ export function SchedulePage() {
       bartenderMenu: {
         title: `${requester} needs coverage`,
         subtitle: describeShift(shift),
-        items: [
-          { label: "I can cover", icon: "♥", checked: answer?.canCover === true, onClick: () => handleRespondCoverage(req.id, true) },
-          { label: "Can't cover", icon: "–", checked: answer?.canCover === false, onClick: () => handleRespondCoverage(req.id, false) },
-          ...(answer ? [{ label: "Clear my answer", icon: "↺", onClick: () => handleRespondCoverage(req.id, null) }] : []),
-        ],
+        // Not answered yet: Cover / Can't right on the card. Answered: the
+        // card just shows the answer, with a ☰ menu to switch or clear it.
+        items: answer
+          ? [
+              answer.canCover
+                ? { label: "Switch to Can't cover", icon: "⇄", onClick: () => handleRespondCoverage(req.id, false) }
+                : { label: "Switch to I can cover", icon: "⇄", onClick: () => handleRespondCoverage(req.id, true) },
+              { label: "Clear answer", icon: "↺", onClick: () => handleRespondCoverage(req.id, null) },
+            ]
+          : [
+              { label: "I can cover", icon: "♥", inlineLabel: "Cover", primary: true, onClick: () => handleRespondCoverage(req.id, true) },
+              { label: "Can't cover", icon: "–", inlineLabel: "Can't", onClick: () => handleRespondCoverage(req.id, false) },
+            ],
       },
     };
   }
@@ -828,6 +1142,7 @@ export function SchedulePage() {
   // one step. The shift diff in setShifts then sends "you've been covered" /
   // "you've been added to cover" and closes the request.
   function handleAssignCover(request: CoverageRequest, workerId: string) {
+    if (blockIfOff(workerId, request.shiftId)) return;
     pushHistory();
     setShifts((current) =>
       current.map((s) =>
@@ -855,9 +1170,9 @@ export function SchedulePage() {
     else handleRemoveCoverageRequest(request.id);
   }
 
-  // Closing a request while they're still on the shift — let them know
+  // Dismissing a request while they're still on the shift — let them know
   // they're still working it.
-  function handleCloseCoverageRequest(request: CoverageRequest, how: "resolved" | "dismissed") {
+  function handleDismissCoverage(request: CoverageRequest) {
     const shift = shifts.find((s) => s.id === request.shiftId);
     handleRemoveCoverageRequest(request.id);
     if (shift?.workerIds.includes(request.requestingWorkerId)) {
@@ -865,36 +1180,105 @@ export function SchedulePage() {
         {
           workerId: request.requestingWorkerId,
           kind: "request",
-          text:
-            how === "dismissed"
-              ? `Your request to give away ${describeShift(shift)} was dismissed. You're still on it.`
-              : `Your give-away request for ${describeShift(shift)} was closed. You're still on it.`,
+          text: `Your request to give away ${describeShift(shift)} was dismissed. You're still on it.`,
         },
       ]);
     }
   }
 
+  // Cancelled, dismissed, or closed: the request goes, and so does every
+  // note about it ("needs coverage", offers, answers) — it's moot now.
   function handleRemoveCoverageRequest(requestId: string) {
     pushHistory();
     setCoverageRequests((current) => current.filter((r) => r.id !== requestId));
+    dropRequestNotes([requestId], ["needs-coverage", "offer", "response"]);
+  }
+
+  function dropRequestNotes(requestIds: string[], kinds: AppNotification["kind"][]) {
+    setNotifications((current) =>
+      current.filter((n) => !(n.requestId && requestIds.includes(n.requestId) && kinds.includes(n.kind))),
+    );
+  }
+
+  // ---- Swaps: asker → other bartender accepts → manager approves --------
+  function swapParts(r: SwapRequest) {
+    return {
+      mine: shifts.find((s) => s.id === r.requestingShiftId),
+      theirs: shifts.find((s) => s.id === r.targetShiftId),
+      requesterName: workers.find((w) => w.id === r.requestingWorkerId)?.name ?? "Someone",
+      targetName: workers.find((w) => w.id === r.targetWorkerId)?.name ?? "Someone",
+    };
   }
 
   function handleRequestSwap(myShiftId: string, targetWorkerId: string, targetShiftId: string) {
     pushHistory();
+    const id = `sw${Date.now()}`;
     setSwapRequests((current) => [
       ...current,
       {
-        id: `sw${Date.now()}`,
+        id,
         requestingWorkerId: currentWorker.id,
         requestingShiftId: myShiftId,
         targetWorkerId,
         targetShiftId,
+        status: "awaiting-partner",
       },
     ]);
+    const mine = shifts.find((s) => s.id === myShiftId);
+    const theirs = shifts.find((s) => s.id === targetShiftId);
+    if (mine && theirs) {
+      notify([
+        {
+          workerId: targetWorkerId,
+          kind: "swap",
+          requestId: id,
+          text: `${currentWorker.name} wants to swap: you'd take ${describeShift(mine)}, they'd take your ${describeShift(theirs)}.`,
+        },
+      ]);
+    }
+    showToast(`Sent to ${workers.find((w) => w.id === targetWorkerId)?.name ?? "them"} to accept`);
     setRequestTab(null);
   }
 
+  // The other bartender agrees — now it goes to the manager.
+  function handleAcceptSwap(requestId: string) {
+    const r = swapRequests.find((x) => x.id === requestId);
+    if (!r) return;
+    pushHistory();
+    setSwapRequests((current) => current.map((x) => (x.id === requestId ? { ...x, status: "awaiting-manager" } : x)));
+    notify([
+      {
+        workerId: r.requestingWorkerId,
+        kind: "swap",
+        requestId,
+        text: `${swapParts(r).targetName} accepted your swap. Waiting on your manager.`,
+      },
+    ]);
+  }
+
+  function handleDeclineSwap(requestId: string) {
+    const r = swapRequests.find((x) => x.id === requestId);
+    if (!r) return;
+    pushHistory();
+    setSwapRequests((current) => current.filter((x) => x.id !== requestId));
+    dropRequestNotes([requestId], ["swap"]);
+    notify([{ workerId: r.requestingWorkerId, kind: "swap", text: `${swapParts(r).targetName} declined your swap.` }]);
+  }
+
+  // The asker takes it back (at any stage).
+  function handleCancelMySwap(requestId: string) {
+    const r = swapRequests.find((x) => x.id === requestId);
+    if (!r) return;
+    pushHistory();
+    setSwapRequests((current) => current.filter((x) => x.id !== requestId));
+    dropRequestNotes([requestId], ["swap"]);
+    notify([{ workerId: r.targetWorkerId, kind: "swap", text: `${swapParts(r).requesterName} cancelled their swap request.` }]);
+  }
+
   function handleApproveSwap(request: SwapRequest) {
+    if (blockIfOff(request.requestingWorkerId, request.targetShiftId) || blockIfOff(request.targetWorkerId, request.requestingShiftId)) {
+      return;
+    }
     pushHistory();
     setShifts((current) =>
       current.map((s) => {
@@ -918,16 +1302,60 @@ export function SchedulePage() {
       }),
     );
     setSwapRequests((current) => current.filter((r) => r.id !== request.id));
+    const { requesterName, targetName } = swapParts(request);
+    notify([
+      { workerId: request.requestingWorkerId, kind: "swap", text: `Your swap with ${targetName} was approved.` },
+      { workerId: request.targetWorkerId, kind: "swap", text: `Your swap with ${requesterName} was approved.` },
+    ]);
   }
 
   function handleDenySwap(requestId: string) {
+    const r = swapRequests.find((x) => x.id === requestId);
     pushHistory();
-    setSwapRequests((current) => current.filter((r) => r.id !== requestId));
+    setSwapRequests((current) => current.filter((x) => x.id !== requestId));
+    if (r) {
+      const { requesterName, targetName } = swapParts(r);
+      dropRequestNotes([requestId], ["swap"]);
+      notify([
+        { workerId: r.requestingWorkerId, kind: "swap", text: `Your swap with ${targetName} was denied.` },
+        { workerId: r.targetWorkerId, kind: "swap", text: `Your swap with ${requesterName} was denied.` },
+      ]);
+    }
   }
 
   function handleSelectDateFromMonth(date: Date) {
     setWeekOffset(weekOffsetForDate(date));
+    // Small screens: open that day's editor too, so it's not one more tap.
+    if (!isWide) setSheetDay(dateToDayName(date));
     setViewMode("week");
+  }
+
+  // From a request card: show that week, scroll to the shift, and pulse it
+  // for a moment so it's obvious which one it is.
+  const [flashShiftIds, setFlashShiftIds] = useState<string[]>([]);
+  // The request card that's selected, and the day(s) it covers. The days
+  // stay highlighted until the same card is clicked again.
+  // For swaps, the two shift blocks stay outlined too (shiftIds).
+  const [selected, setSelected] = useState<{ key: string; dates: string[]; shiftIds: string[] } | null>(null);
+  function handleOpenFromRequest({ key, date, shiftIds = [], endDate }: OpenTarget) {
+    if (selected?.key === key) {
+      setSelected(null);
+      return;
+    }
+    handleSelectDateFromMonth(fromISODate(date));
+    const dates = new Set([date, ...shiftIds.map((id) => shifts.find((s) => s.id === id)?.date ?? date)]);
+    if (endDate) {
+      for (const d = fromISODate(date); toISODate(d) <= endDate; d.setDate(d.getDate() + 1)) dates.add(toISODate(d));
+    }
+    setSelected({ key, dates: [...dates], shiftIds: key.startsWith("swap-") ? shiftIds : [] });
+    setFlashShiftIds([]);
+    window.setTimeout(() => {
+      const target =
+        (shiftIds[0] && document.getElementById(`shift-${shiftIds[0]}`)) || document.getElementById("week-grid");
+      target?.scrollIntoView({ behavior: "smooth", block: "center" });
+      setFlashShiftIds(shiftIds);
+    }, 60);
+    window.setTimeout(() => setFlashShiftIds([]), 2200);
   }
 
   // ---- Posting -------------------------------------------------------
@@ -939,8 +1367,8 @@ export function SchedulePage() {
   const changeCount = postedWeek ? countShiftChanges(postedWeek.shifts, liveWeekShifts) : 0;
   const postState: PostState = !postedWeek ? "draft" : changeCount === 0 ? "posted" : "changed";
 
+  // Not undoable on purpose (see Snapshot) — finalizing sticks.
   function handlePostWeek() {
-    pushHistory();
     // The first time a week is finalized, every bartender hears about it —
     // with their own shifts listed, or a heads-up that they're not on it.
     // (A later "Finalize changes" stays quiet: each edit already notified.)
@@ -968,7 +1396,6 @@ export function SchedulePage() {
   }
 
   function handleUnpostWeek() {
-    pushHistory();
     const { [weekKey]: _removed, ...rest } = postedWeeks;
     setPostedWeeks(rest);
   }
@@ -979,38 +1406,376 @@ export function SchedulePage() {
 
   const myShifts = shifts.filter((s) => s.workerIds.includes(currentWorker.id));
 
+  // Swaps reach the manager only after the other bartender accepts.
+  const managerSwaps = swapRequests.filter((r) => (r.status ?? "awaiting-manager") === "awaiting-manager");
+
+  // This bartender's bell. "Needs coverage" notes only show while their
+  // request is still open, and only the newest of any repeats (older data
+  // could hold several identical ones from a cancelled-then-re-posted request).
+  const openRequestIds = new Set(coverageRequests.map((r) => r.id));
+  const seenCoverageNotes = new Set<string>();
+  const myNotifications = notifications.filter((n) => {
+    if (n.workerId !== currentWorker.id) return false;
+    if (n.kind !== "needs-coverage") return true;
+    if (n.requestId && !openRequestIds.has(n.requestId)) return false;
+    if (seenCoverageNotes.has(n.text)) return false;
+    seenCoverageNotes.add(n.text);
+    return true;
+  });
+
   // Only shifts worth giving away: today or later (no past clutter), on a
   // week the manager has finalized, and not already up for grabs.
   const todayISO = toISODate(new Date());
   const alreadyOffered = new Set(
     coverageRequests.filter((r) => r.requestingWorkerId === currentWorker.id).map((r) => r.shiftId),
   );
+  // Swaps only ever involve shifts that haven't happened yet — both yours and
+  // theirs — soonest first.
+  const upcomingShifts = shifts
+    .filter((s) => s.date >= todayISO)
+    .sort((a, b) => a.date.localeCompare(b.date) || nightMinutes(a.start) - nightMinutes(b.start));
+
   const giveAwayShifts = myShifts
     .filter(
       (s) => s.date >= todayISO && mondayKeyFor(s.date) in postedWeeks && !alreadyOffered.has(s.id),
     )
-    .sort((a, b) => a.date.localeCompare(b.date) || sortMinutes(a.start) - sortMinutes(b.start));
+    .sort((a, b) => a.date.localeCompare(b.date) || nightMinutes(a.start) - nightMinutes(b.start));
 
   const shiftMenuActions: ShiftMenuActions = {
     onAddWorker: handleAddWorkerToShift,
     onRemoveWorker: handleRemoveWorkerFromShift,
     onClearWorkers: handleClearShiftWorkers,
     onSetTime: handleSetShiftTime,
-    onDuplicate: handleDuplicateShift,
     onCopyToDates: handleCopyShiftToDates,
     onDeleteShift: handleDeleteShift,
   };
   const dayMenuShifts = dayMenu ? shifts.filter((s) => s.date === dayMenu.date) : [];
 
 
+  // ---- One day's contents ----------------------------------------------
+  // Shared by the wide 7-column grid and the day sheet on smaller screens.
+  function dayInfo(day: Day) {
+    const date = toISODate(weekDates[day]);
+    const dayTimeOff = timeOff.filter(
+      (r) => r.status === "approved" && date >= r.startDate && date <= r.endDate,
+    );
+    return { date, dayTimeOff, unavailableWorkerIds: dayTimeOff.map((r) => r.workerId) };
+  }
+
+  function renderDayNote(day: Day) {
+    const { date } = dayInfo(day);
+    return (
+      <DayEventNote
+        text={eventFor(dayEvents, day, date)}
+        isAdmin={isAdmin}
+        day={day}
+        dateLabel={formatShortDate(weekDates[day])}
+        isOneOff={date in dayEvents.dates}
+        onSaveWeekly={(text) => handleSaveWeeklyEvent(day, text)}
+        onSaveOneOff={(text) => handleSaveOneOffEvent(date, text)}
+        onResetToWeekly={() => handleResetEventToWeekly(date)}
+      />
+    );
+  }
+
+  /** Everything a shift's menus need — for its full card, or the phone grid's tap menus. */
+  function shiftMenuBase(shift: Shift, day: Day): ShiftMenuBase {
+    const { unavailableWorkerIds } = dayInfo(day);
+    return {
+      shift,
+      dayLabel: `${day} ${formatShortDate(weekDates[day])}`,
+      assignedWorkers: shift.workerIds
+        .map((id) => workers.find((w) => w.id === id))
+        .filter((w): w is Worker => Boolean(w)),
+      addableWorkers: workers.filter(
+        (w) => !shift.workerIds.includes(w.id) && !unavailableWorkerIds.includes(w.id),
+      ),
+      offWorkers: workers.filter((w) => !shift.workerIds.includes(w.id) && unavailableWorkerIds.includes(w.id)),
+      onOffWorkerClick: (id) => openTimeOffFor(id, shift.date),
+      copyTargets: DAYS.filter((d) => d !== day).map((d) => ({
+        day: d,
+        date: toISODate(weekDates[d]),
+        dateLabel: formatShortDate(weekDates[d]),
+      })),
+      actions: shiftMenuActions,
+      onExchange: coverageFor(shift).onExchange,
+    };
+  }
+
+  /** Who's off, the day's shift cards, and (manager) "+ Add shift". */
+  function renderDayShifts(day: Day) {
+    const { date, dayTimeOff } = dayInfo(day);
+    return (
+      <>
+        <DayTimeOff requests={dayTimeOff} workers={workers} onOpen={isAdmin ? setEditingTimeOffId : undefined} />
+        {shifts
+          .filter((shift) => shift.date === date)
+          .map((shift) => (
+            <ShiftCard
+              key={shift.id}
+              {...shiftMenuBase(shift, day)}
+              isAdmin={isAdmin}
+              onDropOnShift={handleDropOnShift}
+              onDropOnWorker={handleDropOnWorker}
+              onMoveShift={handleMoveShiftNextTo}
+              {...coverageFor(shift)}
+              highlightWorkerId={isAdmin ? undefined : currentWorker.id}
+              flash={flashShiftIds.includes(shift.id)}
+              selected={!!selected?.shiftIds.includes(shift.id)}
+              holdDrag={isAdmin ? holdDrag : undefined}
+            />
+          ))}
+        {isAdmin && (
+          <button
+            type="button"
+            onClick={() => handleAddShift(date)}
+            className="rounded-lg border border-dashed border-brite-tan/20 py-1.5 text-xs font-semibold text-brite-tan/50 hover:border-brite-tan/40 hover:text-brite-tan pointer-coarse:py-2.5"
+          >
+            + Add shift
+          </button>
+        )}
+      </>
+    );
+  }
+
+  // Day sheet's ‹ › buttons, rolling over into the previous/next week.
+  function stepSheetDay(delta: number) {
+    if (!sheetDay) return;
+    const i = DAYS.indexOf(sheetDay) + delta;
+    if (i < 0) {
+      setWeekOffset((w) => w - 1);
+      setSheetDay("Sun");
+    } else if (i >= DAYS.length) {
+      setWeekOffset((w) => w + 1);
+      setSheetDay("Mon");
+    } else {
+      setSheetDay(DAYS[i]);
+    }
+  }
+
+  const requestsSection = (
+    <>
+      {isAdmin && (
+        <ManagerRequests
+          timeOff={timeOff}
+          coverageRequests={coverageRequests}
+          swapRequests={managerSwaps}
+          shifts={shifts}
+          workers={workers}
+          onApproveTimeOff={handleApproveTimeOff}
+          onDenyTimeOff={handleDenyTimeOff}
+          onResolveCoverage={handleResolveCoverage}
+          onDismissCoverage={setDismissConfirm}
+          onAssignCover={handleAssignCover}
+          onApproveSwap={setApprovingSwap}
+          onDenySwap={handleDenySwap}
+          onOpen={handleOpenFromRequest}
+          selectedKey={selected?.key}
+        />
+      )}
+      {!isAdmin && (
+        <MyRequests
+          me={currentWorker}
+          workers={workers}
+          shifts={shifts}
+          timeOff={timeOff}
+          coverageRequests={coverageRequests}
+          swapRequests={swapRequests}
+          todayISO={todayISO}
+          onCancelTimeOff={handleCancelTimeOff}
+          onCancelGiveAway={handleRemoveCoverageRequest}
+          onCancelSwap={handleCancelMySwap}
+          onAcceptSwap={handleAcceptSwap}
+          onDeclineSwap={handleDeclineSwap}
+          onOpen={handleOpenFromRequest}
+          selectedKey={selected?.key}
+        />
+      )}
+      {!isAdmin && (
+        <CoverageBoard
+          requests={coverageRequests}
+          shifts={shifts}
+          workers={workers}
+          me={currentWorker}
+          todayISO={todayISO}
+          onRespond={handleRespondCoverage}
+          onOpen={handleOpenFromRequest}
+          selectedKey={selected?.key}
+        />
+      )}
+    </>
+  );
+
+  const calendarSection =
+    viewMode === "month" ? (
+      <MonthView
+        monthOffset={monthOffset}
+        shifts={shifts}
+        workers={workers}
+        timeOff={timeOff}
+        onSelectDate={handleSelectDateFromMonth}
+        highlightWorkerId={isAdmin ? undefined : currentWorker.id}
+        attentionByDate={isAdmin ? attentionByDate() : undefined}
+      />
+    ) : (
+      <div className="relative">
+        {weekInTheWorks && <ScheduleInTheWorks weekLabel={weekLabel} />}
+        <div
+          aria-hidden={weekInTheWorks || undefined}
+          className={weekInTheWorks ? "pointer-events-none select-none opacity-70 blur-[3px]" : undefined}
+        >
+          {isWide ? (
+            <div id="week-grid" className="grid grid-cols-7 gap-2 xl:gap-3">
+              {DAYS.map((day) => {
+                const { date } = dayInfo(day);
+                return (
+                  <div
+                    key={day}
+                    // Right-clicking a day's header or empty space opens the
+                    // day menu — shift cards stop the event, so it doesn't
+                    // fire when right-clicking a shift.
+                    onContextMenu={
+                      isAdmin
+                        ? (e) => {
+                            e.preventDefault();
+                            setDayMenu({
+                              x: e.clientX,
+                              y: e.clientY,
+                              date,
+                              label: `${day} ${formatShortDate(weekDates[day])}`,
+                            });
+                          }
+                        : undefined
+                    }
+                    onDragOver={
+                      isAdmin
+                        ? (e) => {
+                            if (!isShiftDrag(e)) return;
+                            e.preventDefault();
+                            setShiftDragOverDate(date);
+                          }
+                        : undefined
+                    }
+                    onDragLeave={(e) => {
+                      if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+                      setShiftDragOverDate((d) => (d === date ? null : d));
+                    }}
+                    onDrop={
+                      isAdmin
+                        ? (e) => {
+                            if (!isShiftDrag(e)) return;
+                            // Only reached for drops on empty column space —
+                            // a drop on a card is handled (and stopped) there.
+                            e.preventDefault();
+                            setShiftDragOverDate(null);
+                            const shiftId = getShiftDrag(e);
+                            if (shiftId) handleMoveShiftToDay(shiftId, date);
+                          }
+                        : undefined
+                    }
+                    // Where a press-and-hold shift drag can land (see useHoldDrag).
+                    data-drop-day={date}
+                    // @container: its shift cards size themselves to this column's width.
+                    className={`group/day @container -m-1 flex min-w-0 flex-col gap-2 rounded-xl p-1 transition-colors xl:-m-1.5 xl:p-1.5 ${
+                      shiftDragOverDate === date ||
+                      (holdDrag.dragged?.kind === "shift" && holdDrag.target?.date === date && !holdDrag.target.shiftId)
+                        ? "bg-brite-amber/5 ring-1 ring-brite-amber/25"
+                        : ""
+                    }`}
+                  >
+                    <div className="text-center">
+                      <div className="relative">
+                        <div
+                          className={`mx-auto w-fit rounded-full px-2 text-xs font-bold uppercase tracking-wide transition-colors ${
+                            selected?.dates.includes(date)
+                              ? "bg-brite-amber/20 text-brite-amber ring-1 ring-brite-amber/40"
+                              : "text-brite-tan/70"
+                          }`}
+                        >
+                          {day}
+                        </div>
+                        {isAdmin && (
+                          // The day menu is a right-click on computers; touch
+                          // screens have no right-click, so they get this ⋯.
+                          <button
+                            type="button"
+                            aria-label={`${day} options`}
+                            onClick={(e) => {
+                              const rect = e.currentTarget.getBoundingClientRect();
+                              setDayMenu({
+                                x: rect.left,
+                                y: rect.bottom + 4,
+                                date,
+                                label: `${day} ${formatShortDate(weekDates[day])}`,
+                              });
+                            }}
+                            className="absolute -top-1 right-0 hidden rounded px-1.5 py-1 leading-none text-brite-tan/60 pointer-coarse:block"
+                          >
+                            ⋯
+                          </button>
+                        )}
+                      </div>
+                      <div className="text-[11px] text-brite-tan/40">{formatShortDate(weekDates[day])}</div>
+                      {/* Fixed min-height (not conditional) so every day column reserves the
+                          same header space, whether or not it has an event — otherwise the
+                          shift cards below started at different heights per column. */}
+                      <div className="mt-0.5 min-h-[2.25rem]">{renderDayNote(day)}</div>
+                    </div>
+                    {renderDayShifts(day)}
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            // No room for seven full columns: the week as a compact overview;
+            // tapping a day opens its full editor in a sheet (below).
+            <div id="week-grid">
+              <WeekOverview
+                weekOffset={weekOffset}
+                weekDates={weekDates}
+                shifts={shifts}
+                workers={workers}
+                timeOff={timeOff}
+                hasNote={(day, date) => !!eventFor(dayEvents, day, date)}
+                toneFor={(shift) => coverageFor(shift).coverage?.tone}
+                highlightWorkerId={isAdmin ? undefined : currentWorker.id}
+                todayISO={todayISO}
+                selectedDay={sheetDay}
+                onOpenDay={setSheetDay}
+                onSwipeWeek={(delta) => setWeekOffset((w) => w + delta)}
+                holdDrag={isAdmin ? holdDrag : undefined}
+                onShiftTap={
+                  isAdmin
+                    ? (shiftId, kind, at, workerId) => setQuickMenu({ shiftId, kind, ...at, workerId })
+                    : undefined
+                }
+                onAddShift={isAdmin ? handleAddShift : undefined}
+                onDayMenu={
+                  isAdmin
+                    ? (day, at) =>
+                        setDayMenu({
+                          ...at,
+                          date: toISODate(weekDates[day]),
+                          label: `${day} ${formatShortDate(weekDates[day])}`,
+                        })
+                    : undefined
+                }
+              />
+            </div>
+          )}
+        </div>
+      </div>
+    );
+
   return (
     <div className="min-h-screen bg-brite-black">
       <StarField seed={viewMode === "week" ? toISODate(monday) : `month:${monthOffset}`} />
       {/* relative: positioned so it paints above the fixed star layer. */}
-      <header className="relative flex items-center justify-between border-b border-brite-tan/10 px-6 py-3.5">
-        <BritestarLogo />
-        <div className="flex items-center gap-3">
-          <div className="text-right">
+      <header className="relative flex items-center justify-between gap-3 border-b border-brite-tan/10 px-4 py-3 sm:px-6 sm:py-3.5">
+        <BritestarLogo compact />
+        <div className="flex items-center gap-2 sm:gap-3">
+          {/* Phones: the avatar's initials say who's logged in; no room for the name too. */}
+          <div className="hidden text-right sm:block">
             <div className="text-sm font-semibold text-brite-white">
               {isAdmin ? "Manager View" : currentWorker.name}
             </div>
@@ -1020,7 +1785,10 @@ export function SchedulePage() {
           </div>
           {!isAdmin && (
             <NotificationCenter
-              notifications={notifications.filter((n) => n.workerId === currentWorker.id)}
+              notifications={myNotifications}
+              onMarkRead={(id) =>
+                setNotifications((current) => current.map((n) => (n.id === id ? { ...n, read: true } : n)))
+              }
               onMarkAllRead={() =>
                 setNotifications((current) =>
                   current.map((n) => (n.workerId === currentWorker.id ? { ...n, read: true } : n)),
@@ -1060,14 +1828,14 @@ export function SchedulePage() {
           />
           <Link
             to="/"
-            className="ml-2 text-xs font-semibold text-brite-tan/50 hover:text-brite-tan"
+            className="ml-1 whitespace-nowrap text-xs font-semibold text-brite-tan/50 hover:text-brite-tan sm:ml-2"
           >
             Log out
           </Link>
         </div>
       </header>
 
-      <main className="relative p-6">
+      <main className="relative p-4 sm:p-6">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2.5">
             {viewMode === "week" ? (
@@ -1151,37 +1919,39 @@ export function SchedulePage() {
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
+          {/* Compact buttons, with shorter labels on phones so they fit in one row. */}
+          <div className="flex w-full flex-wrap items-center gap-1.5 sm:w-auto sm:gap-2">
             {isAdmin && (
               <button
                 type="button"
                 onClick={handleUndo}
                 disabled={history.length === 0}
-                className="rounded-lg border border-brite-tan/15 px-3 py-2 text-xs font-semibold text-brite-tan/70 hover:border-brite-tan/40 hover:text-brite-tan disabled:opacity-30"
+                aria-label="Undo"
+                className="rounded-lg border border-brite-tan/15 px-2.5 py-1.5 text-xs font-semibold text-brite-tan/70 hover:border-brite-tan/40 hover:text-brite-tan disabled:opacity-30 sm:text-sm"
               >
-                ↺ Undo
+                ↺<span className="hidden sm:inline"> Undo</span>
               </button>
             )}
             {isAdmin && (
-              <Button
-                variant="ghost"
-                className="w-auto px-4"
-                onClick={() => setShowManageWorkers((v) => !v)}
-              >
-                {showManageWorkers ? "Hide bartenders" : "Manage bartenders"}
+              <Button variant="ghost" size="sm" onClick={() => setShowManageWorkers((v) => !v)}>
+                {showManageWorkers ? (
+                  <ShortLabel short="Hide" long="Hide bartenders" />
+                ) : (
+                  <ShortLabel short="Bartenders" long="Manage bartenders" />
+                )}
               </Button>
             )}
             {isAdmin && (
-              <Button
-                variant="ghost"
-                className="w-auto px-4"
-                onClick={() => setShowAvailability((v) => !v)}
-              >
-                {showAvailability ? "Hide availability" : "View availability"}
+              <Button variant="ghost" size="sm" onClick={() => setShowAvailability((v) => !v)}>
+                {showAvailability ? (
+                  <ShortLabel short="Hide" long="Hide availability" />
+                ) : (
+                  <ShortLabel short="Availability" long="View availability" />
+                )}
               </Button>
             )}
             {isAdmin && viewMode === "week" && (
-              <ManagerPostBar
+              <FinalizeButton
                 state={postState}
                 postedAt={postedWeek?.postedAt}
                 changeCount={changeCount}
@@ -1193,20 +1963,20 @@ export function SchedulePage() {
             {!isAdmin &&
               (
                 [
-                  ["availability", "Set availability"],
-                  ["coverage", "Give away shift"],
-                  ["swap", "Swap shift"],
+                  ["availability", "Availability", "Set availability"],
+                  ["timeoff", "Time off", "Request time off"],
+                  ["coverage", "Give away", "Give away shift"],
+                  ["swap", "Swap", "Swap shift"],
                 ] as const
-              ).map(([tab, label]) => (
+              ).map(([tab, short, long]) => (
                 <Button
                   key={tab}
                   variant="ghost"
-                  className={`w-auto px-4 ${
-                    requestTab === tab ? "border-brite-amber text-brite-amber hover:border-brite-amber" : ""
-                  }`}
+                  size="sm"
+                  className={requestTab === tab ? "border-brite-amber text-brite-amber hover:border-brite-amber" : ""}
                   onClick={() => setRequestTab(requestTab === tab ? null : tab)}
                 >
-                  {label}
+                  <ShortLabel short={short} long={long} />
                 </Button>
               ))}
           </div>
@@ -1236,6 +2006,8 @@ export function SchedulePage() {
             }
             onReorder={handleReorderWorker}
             onRename={handleRenameWorker}
+            holdDrag={holdDrag}
+            holdDragMouse={!isWide}
           />
         )}
 
@@ -1243,8 +2015,11 @@ export function SchedulePage() {
           <AvailabilityPanel availability={availability} workers={workers} />
         )}
 
-        {!isAdmin && requestTab === "availability" && (
+        {!isAdmin && (requestTab === "availability" || requestTab === "timeoff") && (
           <SetAvailabilityPanel
+            // A new key per button, so switching between them reopens on the right tab.
+            key={requestTab}
+            startTab={requestTab === "timeoff" ? "days-off" : "general"}
             initialDays={availability.find((a) => a.workerId === currentWorker.id)?.days}
             myTimeOff={timeOff.filter((r) => r.workerId === currentWorker.id)}
             onSubmitAvailability={handleSubmitAvailability}
@@ -1262,193 +2037,26 @@ export function SchedulePage() {
         )}
         {!isAdmin && requestTab === "swap" && (
           <SwapRequestForm
-            myShifts={myShifts}
+            myShifts={upcomingShifts.filter((s) => s.workerIds.includes(currentWorker.id))}
             otherWorkers={workers.filter((w) => w.id !== currentWorker.id)}
-            shifts={shifts}
+            shifts={upcomingShifts}
             onSubmit={handleRequestSwap}
             onCancel={() => setRequestTab(null)}
           />
         )}
 
-        {isAdmin && (
-          <ManagerRequests
-            timeOff={timeOff}
-            coverageRequests={coverageRequests}
-            swapRequests={swapRequests}
-            shifts={shifts}
-            workers={workers}
-            onApproveTimeOff={handleApproveTimeOff}
-            onDenyTimeOff={handleDenyTimeOff}
-            onResolveCoverage={handleResolveCoverage}
-            onDismissCoverage={setDismissConfirm}
-            onAssignCover={handleAssignCover}
-            onApproveSwap={handleApproveSwap}
-            onDenySwap={handleDenySwap}
-          />
-        )}
-        {!isAdmin && (
-          <CoverageBoard
-            requests={coverageRequests}
-            shifts={shifts}
-            workers={workers}
-            me={currentWorker}
-            todayISO={todayISO}
-            onRespond={handleRespondCoverage}
-            onCancelMine={handleRemoveCoverageRequest}
-          />
-        )}
-
-        {viewMode === "month" ? (
-          <MonthView
-            monthOffset={monthOffset}
-            shifts={shifts}
-            workers={workers}
-            timeOff={timeOff}
-            onSelectDate={handleSelectDateFromMonth}
-          />
+        {/* Wide screens: requests, then the week. Smaller screens lead with
+            the week — it's what people open the app to see. */}
+        {isWide ? (
+          <>
+            {requestsSection}
+            {calendarSection}
+          </>
         ) : (
-          <div className="relative">
-          {weekInTheWorks && <ScheduleInTheWorks weekLabel={weekLabel} />}
-          <div
-            aria-hidden={weekInTheWorks || undefined}
-            className={`grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-7 ${
-              weekInTheWorks ? "pointer-events-none select-none opacity-70 blur-[3px]" : ""
-            }`}
-          >
-            {DAYS.map((day) => {
-              const dayDateStr = toISODate(weekDates[day]);
-              const dayShifts = shifts.filter((shift) => shift.date === dayDateStr);
-              const dayTimeOff = timeOff.filter(
-                (r) =>
-                  r.status === "approved" &&
-                  dayDateStr >= r.startDate &&
-                  dayDateStr <= r.endDate,
-              );
-              const unavailableWorkerIds = dayTimeOff.map((r) => r.workerId);
-
-              return (
-                <div
-                  key={day}
-                  // Right-clicking a day's header or empty space opens the
-                  // day menu — shift cards stop the event, so it doesn't
-                  // fire when right-clicking a shift.
-                  onContextMenu={
-                    isAdmin
-                      ? (e) => {
-                          e.preventDefault();
-                          setDayMenu({
-                            x: e.clientX,
-                            y: e.clientY,
-                            date: dayDateStr,
-                            label: `${day} ${formatShortDate(weekDates[day])}`,
-                          });
-                        }
-                      : undefined
-                  }
-                  onDragOver={
-                    isAdmin
-                      ? (e) => {
-                          if (!isShiftDrag(e)) return;
-                          e.preventDefault();
-                          setShiftDragOverDate(dayDateStr);
-                        }
-                      : undefined
-                  }
-                  onDragLeave={(e) => {
-                    if (e.currentTarget.contains(e.relatedTarget as Node)) return;
-                    setShiftDragOverDate((d) => (d === dayDateStr ? null : d));
-                  }}
-                  onDrop={
-                    isAdmin
-                      ? (e) => {
-                          if (!isShiftDrag(e)) return;
-                          // Only reached for drops on empty column space —
-                          // a drop on a card is handled (and stopped) there.
-                          e.preventDefault();
-                          setShiftDragOverDate(null);
-                          const shiftId = getShiftDrag(e);
-                          if (shiftId) handleMoveShiftToDay(shiftId, dayDateStr);
-                        }
-                      : undefined
-                  }
-                  className={`group/day -m-1.5 flex flex-col gap-2 rounded-xl p-1.5 transition-colors ${
-                    shiftDragOverDate === dayDateStr ? "bg-brite-amber/5 ring-1 ring-brite-amber/25" : ""
-                  }`}
-                >
-                  <div className="text-center">
-                    <div className="text-xs font-bold uppercase tracking-wide text-brite-tan/70">
-                      {day}
-                    </div>
-                    <div className="text-[11px] text-brite-tan/40">
-                      {formatShortDate(weekDates[day])}
-                    </div>
-                    {/* Fixed min-height (not conditional) so every day column reserves the
-                        same header space, whether or not it has an event — otherwise the
-                        shift cards below started at different heights per column. */}
-                    <div className="mt-0.5 min-h-[2.25rem]">
-                      <DayEventNote
-                        text={eventFor(dayEvents, day, dayDateStr)}
-                        isAdmin={isAdmin}
-                        day={day}
-                        dateLabel={formatShortDate(weekDates[day])}
-                        isOneOff={dayDateStr in dayEvents.dates}
-                        onSaveWeekly={(text) => handleSaveWeeklyEvent(day, text)}
-                        onSaveOneOff={(text) => handleSaveOneOffEvent(dayDateStr, text)}
-                        onResetToWeekly={() => handleResetEventToWeekly(dayDateStr)}
-                      />
-                    </div>
-                  </div>
-                  {dayTimeOff.map((request) => (
-                    <TimeOffCard
-                      key={request.id}
-                      request={request}
-                      worker={workers.find((w) => w.id === request.workerId) ?? null}
-                    />
-                  ))}
-                  {dayShifts.map((shift) => {
-                    const assignedWorkers = shift.workerIds
-                      .map((id) => workers.find((w) => w.id === id))
-                      .filter((w): w is Worker => Boolean(w));
-                    const addableWorkers = workers.filter(
-                      (w) =>
-                        !shift.workerIds.includes(w.id) &&
-                        !unavailableWorkerIds.includes(w.id),
-                    );
-                    return (
-                      <ShiftCard
-                        key={shift.id}
-                        shift={shift}
-                        dayLabel={`${day} ${formatShortDate(weekDates[day])}`}
-                        assignedWorkers={assignedWorkers}
-                        addableWorkers={addableWorkers}
-                        copyTargets={DAYS.filter((d) => d !== day).map((d) => ({
-                          day: d,
-                          date: toISODate(weekDates[d]),
-                          dateLabel: formatShortDate(weekDates[d]),
-                        }))}
-                        isAdmin={isAdmin}
-                        actions={shiftMenuActions}
-                        onDropOnShift={handleDropOnShift}
-                        onDropOnWorker={handleDropOnWorker}
-                        onMoveShift={handleMoveShiftNextTo}
-                        {...coverageFor(shift)}
-                      />
-                    );
-                  })}
-                  {isAdmin && (
-                    <button
-                      type="button"
-                      onClick={() => handleAddShift(dayDateStr)}
-                      className="rounded-lg border border-dashed border-brite-tan/20 py-1.5 text-xs font-semibold text-brite-tan/50 hover:border-brite-tan/40 hover:text-brite-tan"
-                    >
-                      + Add shift
-                    </button>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-          </div>
+          <>
+            {calendarSection}
+            <div className="mt-6">{requestsSection}</div>
+          </>
         )}
 
         {resolveConfirm && (
@@ -1465,12 +2073,177 @@ export function SchedulePage() {
           />
         )}
 
+        {editingTimeOffId &&
+          (() => {
+            const request = timeOff.find((r) => r.id === editingTimeOffId);
+            const worker = request && workers.find((w) => w.id === request.workerId);
+            if (!request || !worker) return null;
+            return (
+              <TimeOffDialog
+                key={request.id}
+                request={request}
+                worker={worker}
+                todayISO={todayISO}
+                onSave={(start, end) => handleUpdateTimeOff(request.id, start, end)}
+                onCancelTimeOff={() => handleManagerCancelTimeOff(request.id)}
+                onClose={() => setEditingTimeOffId(null)}
+              />
+            );
+          })()}
+
+        {approvingSwap &&
+          (() => {
+            const r = approvingSwap;
+            const requester = workers.find((w) => w.id === r.requestingWorkerId);
+            const target = workers.find((w) => w.id === r.targetWorkerId);
+            const mine = shifts.find((s) => s.id === r.requestingShiftId);
+            const theirs = shifts.find((s) => s.id === r.targetShiftId);
+            if (!requester || !target || !mine || !theirs) return null;
+            return (
+              <SwapApproveDialog
+                requester={requester}
+                target={target}
+                requesterShift={mine}
+                targetShift={theirs}
+                onApprove={() => handleApproveSwap(r)}
+                onDeny={() => handleDenySwap(r.id)}
+                onClose={() => setApprovingSwap(null)}
+              />
+            );
+          })()}
+
+        {toast && (
+          <div
+            role="status"
+            // bottom: clear of the iPhone home bar when installed.
+            className="fixed bottom-[calc(1.25rem+env(safe-area-inset-bottom))] left-1/2 z-[70] flex w-max max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-3 rounded-full border border-brite-tan/25 bg-brite-black-soft py-2 pl-4 pr-4 text-sm text-brite-cream shadow-2xl shadow-black/60"
+          >
+            <span className="text-center">{toast.message}</span>
+            {toast.undo && (
+              <button
+                type="button"
+                onClick={() => {
+                  handleUndo();
+                  setToast(null);
+                }}
+                className="-my-1 -mr-2 shrink-0 rounded-full px-3 py-1 font-bold text-brite-amber hover:bg-brite-amber/10"
+              >
+                Undo
+              </button>
+            )}
+          </div>
+        )}
+
+        {quickMenu &&
+          (() => {
+            const shift = shifts.find((s) => s.id === quickMenu.shiftId);
+            if (!shift) return null;
+            return (
+              <ShiftQuickMenu
+                key={`${quickMenu.shiftId}-${quickMenu.kind}-${quickMenu.workerId ?? ""}`}
+                kind={quickMenu.kind}
+                x={quickMenu.x}
+                y={quickMenu.y}
+                focusWorkerId={quickMenu.workerId}
+                onClose={() => setQuickMenu(null)}
+                {...shiftMenuBase(shift, dateToDayName(fromISODate(shift.date)))}
+              />
+            );
+          })()}
+
+        {/* Small screens: one day's full editor, opened from the week overview. */}
+        {!isWide && viewMode === "week" && sheetDay && (
+          <Sheet onClose={() => setSheetDay(null)} labelledBy="day-sheet-title">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => stepSheetDay(-1)}
+                aria-label="Previous day"
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-xl text-brite-tan/70 hover:bg-brite-tan/10 active:bg-brite-tan/10"
+              >
+                ‹
+              </button>
+              <div className="min-w-0 flex-1 text-center">
+                <h2 id="day-sheet-title" className="text-base font-bold text-brite-white">
+                  {DAY_FULL_NAMES[sheetDay]}
+                  {toISODate(weekDates[sheetDay]) === todayISO && (
+                    <span className="ml-2 rounded-full bg-brite-red px-2 py-0.5 align-middle text-[10px] font-bold uppercase text-brite-white">
+                      Today
+                    </span>
+                  )}
+                </h2>
+                <div className="text-xs text-brite-tan/50">{formatShortDate(weekDates[sheetDay])}</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => stepSheetDay(1)}
+                aria-label="Next day"
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-xl text-brite-tan/70 hover:bg-brite-tan/10 active:bg-brite-tan/10"
+              >
+                ›
+              </button>
+            </div>
+            <div className="mt-1 text-center">{renderDayNote(sheetDay)}</div>
+            <div className="@container mt-3 flex flex-col gap-2">{renderDayShifts(sheetDay)}</div>
+            {isAdmin && (
+              // On a computer these live on a right-click of the day; touch
+              // screens have no right-click, so they get a button.
+              <button
+                type="button"
+                onClick={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setDayMenu({
+                    x: rect.left,
+                    y: rect.top - 8,
+                    date: toISODate(weekDates[sheetDay]),
+                    label: `${sheetDay} ${formatShortDate(weekDates[sheetDay])}`,
+                  });
+                }}
+                className="mt-3 w-full rounded-lg py-2 text-xs font-semibold text-brite-tan/50 hover:text-brite-tan"
+              >
+                ⋯ Day options (sort, clear, delete)
+              </button>
+            )}
+          </Sheet>
+        )}
+
+        {copyPrevFor &&
+          (() => {
+            const date = copyPrevFor;
+            const day = dateToDayName(fromISODate(date));
+            const lastMonday = getMondayOfWeek(weekOffset - 1);
+            const week = copyPlan("week", date);
+            const one = copyPlan("day", date);
+            return (
+              <CopyPreviousWeekDialog
+                dayName={DAY_FULL_NAMES[day]}
+                week={{
+                  from: formatWeekRange(lastMonday),
+                  to: formatWeekRange(monday),
+                  shiftCount: week.shiftCount,
+                  pendingRequests: week.pendingRequests,
+                }}
+                day={{
+                  from: `${day} ${formatShortDate(fromISODate(weekBefore(date)))}`,
+                  to: `${day} ${formatShortDate(fromISODate(date))}`,
+                  shiftCount: one.shiftCount,
+                  pendingRequests: one.pendingRequests,
+                }}
+                onCopy={(scope) => {
+                  handleCopyFromPreviousWeek(scope, date);
+                  setCopyPrevFor(null);
+                }}
+                onClose={() => setCopyPrevFor(null)}
+              />
+            );
+          })()}
+
         {dismissConfirm && (
           <DismissCoverageDialog
             shift={shifts.find((s) => s.id === dismissConfirm.shiftId)}
             worker={workers.find((w) => w.id === dismissConfirm.requestingWorkerId)}
             note={dismissConfirm.note}
-            onDismiss={() => handleCloseCoverageRequest(dismissConfirm, "dismissed")}
+            onDismiss={() => handleDismissCoverage(dismissConfirm)}
             onClose={() => setDismissConfirm(null)}
           />
         )}
@@ -1492,6 +2265,14 @@ export function SchedulePage() {
               disabled={dayMenuShifts.length < 2}
               onClick={() => {
                 handleSortDay(dayMenu.date);
+                setDayMenu(null);
+              }}
+            />
+            <MenuItem
+              icon="⟲"
+              label="Copy from previous week…"
+              onClick={() => {
+                openCopyFromPreviousWeek(dayMenu.date);
                 setDayMenu(null);
               }}
             />
@@ -1519,6 +2300,9 @@ export function SchedulePage() {
             />
           </Popover>
         )}
+
+        <HoldDragGhost drag={holdDrag} />
+        <InstallAppLink />
       </main>
     </div>
   );
