@@ -93,7 +93,6 @@ import { WorkerPickerList } from "./WorkerPickerList";
 import { Button, ShortLabel } from "./ui/Button";
 import { Modal } from "./ui/Modal";
 import { ShareScheduleDialog } from "./ShareScheduleDialog";
-import { BackupDialog } from "./BackupDialog";
 import { MenuDivider, MenuItem, MenuLabel, Popover } from "./ui/Popover";
 
 type ViewMode = "week" | "month";
@@ -522,9 +521,8 @@ export function SchedulePage() {
     setShifts((current) => current.filter((shift) => shift.date !== date));
   }
 
-  // ---- Share as image / backup (manager toolbar) -----------------------
+  // ---- Share as image (manager toolbar) --------------------------------
   const [showShare, setShowShare] = useState(false);
-  const [showBackup, setShowBackup] = useState(false);
 
   // ---- Copy from previous week (day menu) ------------------------------
   const [copyPrevFor, setCopyPrevFor] = useState<string | null>(null);
@@ -1957,14 +1955,8 @@ export function SchedulePage() {
               </Button>
             )}
             {/* TEMPORARY (until the Go backend is live): with no server, the
-                manager sends the week to the group chat as an image, and
-                backs up this browser's data by hand. Remove both buttons,
-                ShareScheduleDialog, BackupDialog and data/backup.ts then. */}
-            {isAdmin && (
-              <Button variant="ghost" size="sm" onClick={() => setShowBackup(true)}>
-                Backup
-              </Button>
-            )}
+                manager sends the week to the group chat as an image.
+                Remove this button and ShareScheduleDialog then. */}
             {isAdmin && viewMode === "week" && (
               <Button variant="ghost" size="sm" onClick={() => setShowShare(true)}>
                 <ShortLabel short="Share" long="Share schedule" />
@@ -2234,7 +2226,6 @@ export function SchedulePage() {
             onClose={() => setShowShare(false)}
           />
         )}
-        {showBackup && <BackupDialog onClose={() => setShowBackup(false)} />}
 
         {copyPrevFor &&
           (() => {
