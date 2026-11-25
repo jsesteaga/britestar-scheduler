@@ -7,6 +7,8 @@ type AvailabilityFormProps = {
   initialDays?: Record<Day, DayAvailability>;
   onSubmit: (days: Record<Day, DayAvailability>) => void;
   onCancel: () => void;
+  // The manager filling this in for someone says "Save", not "Send to manager".
+  submitLabel?: string;
 };
 
 function defaultDays(): Record<Day, DayAvailability> {
@@ -17,7 +19,7 @@ function defaultDays(): Record<Day, DayAvailability> {
   return days;
 }
 
-export function AvailabilityForm({ initialDays, onSubmit, onCancel }: AvailabilityFormProps) {
+export function AvailabilityForm({ initialDays, onSubmit, onCancel, submitLabel = "Send to manager" }: AvailabilityFormProps) {
   const [days, setDays] = useState<Record<Day, DayAvailability>>(initialDays ?? defaultDays());
 
   function toggleDay(day: Day) {
@@ -69,7 +71,7 @@ export function AvailabilityForm({ initialDays, onSubmit, onCancel }: Availabili
 
       <div className="mt-3 flex items-center gap-3">
         <Button type="submit" className="w-auto px-5">
-          Send to manager
+          {submitLabel}
         </Button>
         <button
           type="button"

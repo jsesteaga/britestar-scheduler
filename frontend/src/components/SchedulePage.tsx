@@ -93,6 +93,7 @@ import { WorkerPickerList } from "./WorkerPickerList";
 import { Button, ShortLabel } from "./ui/Button";
 import { Modal } from "./ui/Modal";
 import { ShareScheduleDialog } from "./ShareScheduleDialog";
+import { ManagerEntryDialog, type ManagerEntryMode } from "./ManagerEntryDialog";
 import { MenuDivider, MenuItem, MenuLabel, Popover } from "./ui/Popover";
 
 type ViewMode = "week" | "month";
@@ -778,6 +779,37 @@ export function SchedulePage() {
     return startDate === endDate
       ? formatFriendlyDate(startDate)
       : `${formatFriendlyDate(startDate)} – ${formatFriendlyDate(endDate)}`;
+  }
+
+  // ---- Manager entering availability / time off for someone -------------
+  // (Availability ▾ menu) — e.g. a bartender texted it in. Same records a
+  // bartender's own submission creates; time off here is approved at once.
+  const [availabilityMenu, setAvailabilityMenu] = useState<{ x: number; y: number } | null>(null);
+  const [managerEntry, setManagerEntry] = useState<ManagerEntryMode | null>(null);
+
+  function handleManagerSetAvailability(workerId: string, days: Record<Day, DayAvailability>) {
+    pushHistory();
+    setAvailability((current) => [
+      ...current.filter((a) => a.workerId !== workerId),
+      { id: `av${Date.now()}`, workerId, days, submittedAt: new Date().toISOString() },
+    ]);
+    showToast(`Saved ${workers.find((w) => w.id === workerId)?.name ?? "their"}'s availability`, { undo: true });
+  }
+
+  function handleManagerAddTimeOff(workerId: string, startDate: string, endDate: string, reason: string) {
+    pushHistory();
+    setTimeOff((current) => [
+      ...current,
+      { id: `t${Date.now()}`, workerId, startDate, endDate, reason: reason || undefined, status: "approved" },
+    ]);
+    removeFromShiftsInRange(workerId, startDate, endDate);
+    notify([
+      { workerId, kind: "request", text: `Your manager added time off for ${describeRange(startDate, endDate)}.` },
+    ]);
+    showToast(
+      `${workers.find((w) => w.id === workerId)?.name ?? "They"} is off ${describeRange(startDate, endDate)}`,
+      { undo: true },
+    );
   }
 
   function handleApproveTimeOff(requestId: string) {
@@ -1946,12 +1978,21 @@ export function SchedulePage() {
               </Button>
             )}
             {isAdmin && (
-              <Button variant="ghost" size="sm" onClick={() => setShowAvailability((v) => !v)}>
-                {showAvailability ? (
-                  <ShortLabel short="Hide" long="Hide availability" />
-                ) : (
-                  <ShortLabel short="Availability" long="View availability" />
-                )}
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-haspopup="menu"
+                onClick={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setAvailabilityMenu({ x: rect.left, y: rect.bottom + 4 });
+                }}
+              >
+                Availability ▾
+              </Button>
+            )}
+            {isAdmin && viewMode === "week" && (
+              <Button variant="ghost" size="sm" onClick={() => openCopyFromPreviousWeek(toISODate(monday))}>
+                <ShortLabel short="Copy last wk" long="Copy last week" />
               </Button>
             )}
             {/* TEMPORARY (until the Go backend is live): with no server, the
@@ -2024,7 +2065,13 @@ export function SchedulePage() {
         )}
 
         {isAdmin && showAvailability && (
-          <AvailabilityPanel availability={availability} workers={workers} />
+          <AvailabilityPanel
+            availability={availability}
+            workers={workers}
+            timeOff={timeOff}
+            weekDates={weekDates}
+            weekLabel={weekOffset === 0 ? "this week" : weekLabel}
+          />
         )}
 
         {!isAdmin && (requestTab === "availability" || requestTab === "timeoff") && (
@@ -2265,6 +2312,50 @@ export function SchedulePage() {
             note={dismissConfirm.note}
             onDismiss={() => handleDismissCoverage(dismissConfirm)}
             onClose={() => setDismissConfirm(null)}
+          />
+        )}
+
+        {availabilityMenu && (
+          <Popover
+            x={availabilityMenu.x}
+            y={availabilityMenu.y}
+            onClose={() => setAvailabilityMenu(null)}
+            className="w-56"
+          >
+            <MenuItem
+              icon="👁"
+              label={showAvailability ? "Hide availability" : "View availability"}
+              onClick={() => {
+                setShowAvailability((v) => !v);
+                setAvailabilityMenu(null);
+              }}
+            />
+            <MenuItem
+              icon="✎"
+              label="Set someone's availability…"
+              onClick={() => {
+                setManagerEntry("availability");
+                setAvailabilityMenu(null);
+              }}
+            />
+            <MenuItem
+              icon="✈"
+              label="Add time off…"
+              onClick={() => {
+                setManagerEntry("timeoff");
+                setAvailabilityMenu(null);
+              }}
+            />
+          </Popover>
+        )}
+        {managerEntry && (
+          <ManagerEntryDialog
+            mode={managerEntry}
+            workers={workers}
+            availability={availability}
+            onSetAvailability={handleManagerSetAvailability}
+            onAddTimeOff={handleManagerAddTimeOff}
+            onClose={() => setManagerEntry(null)}
           />
         )}
 

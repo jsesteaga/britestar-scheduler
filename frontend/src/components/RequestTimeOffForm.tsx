@@ -5,9 +5,10 @@ import { Button } from "./ui/Button";
 type RequestTimeOffFormProps = {
   onSubmit: (startDate: string, endDate: string, reason: string) => void;
   onCancel: () => void;
+  submitLabel?: string;
 };
 
-export function RequestTimeOffForm({ onSubmit, onCancel }: RequestTimeOffFormProps) {
+export function RequestTimeOffForm({ onSubmit, onCancel, submitLabel = "Submit request" }: RequestTimeOffFormProps) {
   const today = toISODate(new Date());
   const [startDate, setStartDate] = useState(today);
   const [endDate, setEndDate] = useState(today);
@@ -83,7 +84,7 @@ export function RequestTimeOffForm({ onSubmit, onCancel }: RequestTimeOffFormPro
       {error && <p className="w-full text-sm text-brite-red-bright">{error}</p>}
 
       <Button type="submit" className="w-auto px-5">
-        Submit request
+        {submitLabel}
       </Button>
       <button
         type="button"
