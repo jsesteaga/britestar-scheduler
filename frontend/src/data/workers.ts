@@ -9,6 +9,11 @@ import { readJSON, writeJSON } from "./storage";
  */
 
 const STORAGE_KEY = "britestar-workers";
+// Usernames of built-in default bartenders the manager removed, so the
+// "merge in new defaults" step in getWorkers doesn't quietly add them back.
+const REMOVED_KEY = "britestar-removed-default-workers";
+
+const getRemovedDefaults = () => readJSON<string[]>(REMOVED_KEY) ?? [];
 
 const AVATAR_PALETTE = [
   "#ab3131",
@@ -76,7 +81,11 @@ export function getWorkers(): Worker[] {
     const workers = stored.map(({ managerName, ...w }) => (managerName ? { ...w, name: managerName } : w));
     // Merge in any newly-added default names a returning browser doesn't
     // have yet, without touching existing entries (claimed names, etc.).
-    const missing = DEFAULT_WORKERS.filter((d) => !workers.some((w) => w.username === d.username));
+    // Skip any the manager deliberately removed.
+    const removed = getRemovedDefaults();
+    const missing = DEFAULT_WORKERS.filter(
+      (d) => !removed.includes(d.username) && !workers.some((w) => w.username === d.username),
+    );
     if (missing.length === 0) return workers;
     const merged = [...workers, ...missing];
     saveWorkers(merged);
@@ -107,6 +116,11 @@ export function addWorker(username: string, current: Worker[]): Worker[] {
 }
 
 export function removeWorker(id: string, current: Worker[]): Worker[] {
+  const removedWorker = current.find((w) => w.id === id);
+  if (removedWorker && DEFAULT_WORKERS.some((d) => d.username === removedWorker.username)) {
+    const removed = getRemovedDefaults();
+    if (!removed.includes(removedWorker.username)) writeJSON(REMOVED_KEY, [...removed, removedWorker.username]);
+  }
   const updated = current.filter((w) => w.id !== id);
   saveWorkers(updated);
   return updated;
